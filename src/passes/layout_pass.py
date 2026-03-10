@@ -2,7 +2,10 @@
 
 from typing import Any
 
-from triton import ir as tir
+try:
+    from triton._C.libtriton import ir as tir
+except ImportError:
+    tir = None  # type: ignore
 
 
 class LayoutConversionPass:
@@ -11,7 +14,7 @@ class LayoutConversionPass:
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config = config or {}
 
-    def run(self, module: tir.Module) -> tir.Module:
+    def run(self, module: Any) -> Any:
         """Run the layout conversion pass.
 
         Args:
@@ -20,4 +23,9 @@ class LayoutConversionPass:
         Returns:
             The transformed module.
         """
+        if tir is None:
+            raise NotImplementedError(
+                "LayoutConversionPass requires Triton's IR module. "
+                "Ensure triton is installed."
+            )
         raise NotImplementedError("LayoutConversionPass not yet implemented")

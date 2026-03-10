@@ -10,35 +10,37 @@
   
 - **TypeMapper** 类型映射
   - 支持 9 种基本数据类型映射（i1/i8/i16/i32/i64/fp16/bf16/fp32/fp64）
-  - TensorType 创建
 
-### 2. MLIR 解析器 (✅ 完成)
+### 2. 轻量级 IR 与 NumPy 运行时 (✅ 完成)
+- **adapter ir** (`ir.py`) 独立 IR 抽象，不依赖 PyPTO
+- **NumPyRuntime** 在 CPU 环境执行转换后的 IR
+
+### 3. MLIR 解析器 (✅ 完成)
 - **MLIRParser** 轻量级 MLIR 文本解析器
-  - 解析操作、操作数、类型
-  - 支持基本 MLIR 文本格式
-  - 独立于 Triton 环境运行
+  - 解析操作、操作数、类型、arith.constant 字面量
+  - 支持 "op %a, %b" 和 "op(%a, %b)" 格式
 
-### 3. 测试框架 (✅ 完成)
-- 单元测试基础设施
-- 类型映射测试
-- 转换器初始化测试
-- 支持的操作列表验证
+### 4. Phase 1 算子转换 (✅ 完成)
+- arith.constant, arith.addf/subf/mulf/divf
+- tt.load, tt.store
+- tt.make_block_ptr, tt.advance (框架)
+- tt.program_id (框架)
 
-### 4. 示例代码 (✅ 完成)
-- `examples/phase1_elementwise_example.py`
-  - 演示解析流程
-  - 类型映射示例
-  - Phase 1 路线图展示
+### 5. 端到端流程 (✅ 完成)
+- `convert_ttir_to_pypto(ttir_text)` 入口
+- 向量加法 kernel 解析 → 转换 → NumPy 执行通过
 
 ## 当前状态
 
 ### 文件结构
 ```
 src/triton_adapter/
-├── __init__.py           # 模块导出
-├── ir_extractor.py       # IR 提取（待实现）
+├── __init__.py           # 模块导出 + convert_ttir_to_pypto
+├── ir.py                 # ✅ 轻量级 IR 抽象
+├── runtime.py            # ✅ NumPy CPU 运行时
+├── ir_extractor.py       # extract_ttir (需 GPU driver)
 ├── mlir_parser.py        # ✅ MLIR 文本解析器
-└── ttir_converter.py     # ✅ 转换器框架
+└── ttir_converter.py     # ✅ 转换器 + 算子实现
 
 tests/
 ├── test_ttir_converter.py  # ✅ 单元测试

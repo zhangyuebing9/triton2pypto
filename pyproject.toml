@@ -1,6 +1,6 @@
 [build-system]
-requires = ["scikit-build-core>=0.10.0", "nanobind>=2.0.0"]
-build-backend = "scikit_build_core.build"
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "triton2pypto"
@@ -25,9 +25,11 @@ classifiers = [
 
 dependencies = [
     "triton>=3.0.0",
+    "numpy>=1.20.0",
 ]
 
 [project.optional-dependencies]
+pypto = ["pypto>=0.1.0"]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
@@ -40,13 +42,8 @@ dev = [
 Homepage = "https://github.com/yourorg/triton2pypto"
 Repository = "https://github.com/yourorg/triton2pypto"
 
-[tool.scikit-build]
-minimum-version = "0.10"
-build-dir = "build/{wheel_tag}"
-
-[tool.scikit-build.cmake]
-version = ">=3.15"
-build-type = "RelWithDebInfo"
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.ruff]
 line-length = 100
