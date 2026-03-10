@@ -1,0 +1,9 @@
+[submodule "third_party/triton"]
+	path = third_party/triton
+	url = https://github.com/triton-lang/triton.git
+[submodule "third_party/pypto"]
+	path = third_party/pypto
+	url = https://github.com/hw-native-sys/pypto.git
+[submodule "third_party/simpler"]
+	path = third_party/simpler
+	url = https://github.com/ChaoWao/simpler
