@@ -214,3 +214,49 @@ def triton_to_pypto(ttir: tir.Module) -> TensorGraph:
 
 - Triton: `third_party/triton/README.md`, `third_party/triton/AGENTS.md`
 - PyPTO: `third_party/pypto/README.md`
+
+## Cursor Cloud specific instructions
+
+### Environment overview
+
+This is a Python library project (no running services). A virtualenv at `/workspace/.venv` contains all dependencies. Always activate it before running commands:
+
+```bash
+source /workspace/.venv/bin/activate
+```
+
+The main package cannot be `pip install -e .` because `pyproject.toml` uses scikit-build-core but no `CMakeLists.txt` exists yet (C++ extension layer not implemented). Instead, use `PYTHONPATH=/workspace/src` to make the source importable.
+
+### Known compatibility issues
+
+1. **`DataType.FP64` AttributeError**: The pinned pypto submodule does not expose `DataType.FP64` (reserved in C++ header but not bound to Python). The `ttir_converter.py` references it at class-definition time, and `triton_adapter/__init__.py` catches `ImportError` but not `AttributeError`. When pypto is installed, importing `triton_adapter` fails. Workaround: to run MLIR parser / IR extractor tests, temporarily `pip uninstall pypto -y` so the `except ImportError` path in `__init__.py` activates.
+
+2. **`triton.ir` ImportError**: Triton 3.6.0 does not expose a top-level `ir` submodule. `passes/layout_pass.py` imports `from triton import ir as tir` unconditionally, so `test_layout_pass.py` fails at collection. `ir_extractor.py` handles this gracefully with try/except.
+
+### Running tests
+
+```bash
+source /workspace/.venv/bin/activate
+
+# Run MLIR parser and IR extractor tests (requires pypto NOT installed):
+pip uninstall pypto -y
+PYTHONPATH=/workspace/src pytest tests/test_mlir_parser.py tests/test_ir_extractor.py -v
+
+# Reinstall pypto after testing:
+cd /workspace/third_party/pypto && pip install -e . && cd /workspace
+```
+
+Pre-existing test failures (8 pass / 8 fail out of 16) are due to MLIR parser op-name extraction bugs and triton.ir unavailability—not environment issues.
+
+### Lint and type check
+
+```bash
+source /workspace/.venv/bin/activate
+ruff check src/           # linter (40 pre-existing warnings)
+ruff format --check src/  # format check
+mypy src/                 # type check (passes clean)
+```
+
+### Building pypto from source
+
+pypto is a C++ extension built with scikit-build-core + nanobind. Building takes ~70s. Requires `python3-dev` system package. The update script handles this automatically.
