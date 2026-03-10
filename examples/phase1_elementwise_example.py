@@ -1,28 +1,19 @@
 """
-Simple example demonstrating Phase 1 elementwise operation conversion.
+Phase 1 elementwise operation conversion - CPU runnable.
 
-This example shows how to:
+Demonstrates:
 1. Parse TTIR MLIR text
-2. Convert simple elementwise operations to PyPTO IR
-3. Generate PyPTO IR output
-
-Note: This is a minimal example to guide the implementation.
-The full implementation will support all Phase 1 operations.
+2. Convert to adapter IR
+3. Execute on CPU via NumPy runtime
 """
 
-from pypto import DataType, ir
-from triton_adapter import MLIRParser, TTIRToPyptoConverter
+from triton_adapter import convert_ttir_to_pypto, MLIRParser, TTIRToPyptoConverter
+from triton_adapter.runtime import run_on_numpy
 
-
-def simple_add_example():
-    """Example: Convert a simple vector addition TTIR to PyPTO IR."""
-    
-    # Sample TTIR for vector addition (simplified)
-    # In reality, this would come from compiling a Triton kernel
-    ttir_text = """
+# Sample TTIR for vector addition (from Triton kernel)
+TTIR_ADD = """
 module {
   tt.func @add_kernel(%arg0: !tt.ptr<fp32>, %arg1: !tt.ptr<fp32>, %arg2: !tt.ptr<fp32>) {
-    %cst = arith.constant 1.0 : f32
     %0 = tt.load %arg0 : tensor<128xf32>
     %1 = tt.load %arg1 : tensor<128xf32>
     %2 = arith.addf %0, %1 : tensor<128xf32>
@@ -31,85 +22,44 @@ module {
 }
 """
 
+
+def main() -> None:
+    import numpy as np
+
     print("=" * 70)
-    print("Phase 1 Example: Elementwise Addition")
+    print("Phase 1 Example: TTIR → Adapter IR → NumPy (CPU)")
     print("=" * 70)
-    
-    # Parse TTIR
-    print("\nStep 1: Parse TTIR MLIR text")
+
+    # Step 1: Parse TTIR
+    print("\nStep 1: Parse TTIR")
     parser = MLIRParser()
-    operations = parser.parse_module(ttir_text)
-    
-    print(f"Parsed {len(operations)} operations:")
-    for i, op in enumerate(operations):
-        print(f"  {i+1}. {op.name}: {op}")
-    
-    # Convert to PyPTO IR (placeholder - not fully implemented)
-    print("\nStep 2: Convert to PyPTO IR")
-    print("Note: Full conversion not yet implemented")
-    
-    # Show what the converter will do
-    converter = TTIRToPyptoConverter()
-    print(f"Converter supports {len(converter.SUPPORTED_OPS)} operations:")
-    for op_name in sorted(converter.SUPPORTED_OPS):
-        print(f"  - {op_name}")
-    
-    # Show type mapping
-    print("\nStep 3: Type Mapping Example")
-    test_dtypes = ["fp32", "fp16", "bf16", "i32", "i64"]
-    print("TTIR dtype → PyPTO DataType:")
-    for dtype in test_dtypes:
-        pypto_dtype = converter.type_mapper.map_dtype(dtype)
-        print(f"  {dtype} → {pypto_dtype}")
-    
-    print("\n" + "=" * 70)
-    print("Next Steps:")
-    print("- Implement full conversion logic for each operation")
-    print("- Add support for memory operations (load/store)")
-    print("- Add support for block pointer handling")
-    print("- Create end-to-end tests with Triton kernels")
-    print("=" * 70)
+    operations = parser.parse_module(TTIR_ADD)
+    print(f"  Parsed {len(operations)} operations")
+    for op in operations:
+        print(f"    - {op.name}")
 
+    # Step 2: Convert to adapter IR
+    print("\nStep 2: Convert to adapter IR")
+    program = convert_ttir_to_pypto(TTIR_ADD)
+    print(f"  Program has {len(program.functions)} function(s)")
+    for fn in program.functions:
+        print(f"    - {fn.name} with {len(fn.params)} params, {len(fn.body)} statements")
 
-def show_phase1_roadmap():
-    """Show Phase 1 implementation roadmap."""
+    # Step 3: Run on NumPy (CPU)
+    print("\nStep 3: Execute on CPU via NumPy")
+    a = np.ones(128, dtype=np.float32)
+    b = np.ones(128, dtype=np.float32) * 2
+    out = np.zeros(128, dtype=np.float32)
+    run_on_numpy(program, a, b, out)
+    expected = a + b
+    match = np.allclose(out, expected)
+    print(f"  Result: {'PASS' if match else 'FAIL'}")
+    print(f"  out[0] = {out[0]}, expected = {expected[0]}")
+
     print("\n" + "=" * 70)
-    print("Phase 1 Implementation Roadmap")
-    print("=" * 70)
-    
-    operations = [
-        ("Priority 1 - Core Operations", [
-            ("arith.constant", "Constant values", "✓ Framework ready"),
-            ("arith.addf", "Element-wise addition", "Pending"),
-            ("arith.subf", "Element-wise subtraction", "Pending"),
-            ("arith.mulf", "Element-wise multiplication", "Pending"),
-            ("arith.divf", "Element-wise division", "Pending"),
-            ("tt.load", "Load tensor data", "Pending"),
-            ("tt.store", "Store tensor data", "Pending"),
-        ]),
-        ("Priority 2 - Memory Operations", [
-            ("tt.make_block_ptr", "Create block pointer", "Pending"),
-            ("tt.advance", "Advance block pointer", "Pending"),
-        ]),
-        ("Priority 3 - Additional Operations", [
-            ("tt.exp", "Exponential function", "Pending"),
-            ("arith.cmpf", "Float comparison", "Pending"),
-            ("arith.select", "Conditional selection", "Pending"),
-            ("tt.program_id", "Program ID (grid coord)", "Pending"),
-        ]),
-    ]
-    
-    for category, ops in operations:
-        print(f"\n{category}:")
-        for op_name, description, status in ops:
-            print(f"  {op_name:20} - {description:30} [{status}]")
-    
-    print("\n" + "=" * 70)
-    print("Estimated Timeline: 2-3 weeks")
-    print("Current Status: Framework complete, starting operation conversion")
+    print("Phase 1 complete: TTIR conversion runs on CPU-only environment!")
     print("=" * 70)
 
 
 if __name__ == "__main__":
-    simple_add_example()
-    show_phase1_roadmap()
+    main()

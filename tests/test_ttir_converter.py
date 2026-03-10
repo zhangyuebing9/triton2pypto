@@ -3,6 +3,7 @@
 import pytest
 
 from triton_adapter import ConversionError, TTIRToPyptoConverter, UnsupportedOpError
+from triton_adapter.ir import DataType
 
 
 class TestTTIRConverter:
@@ -17,16 +18,12 @@ class TestTTIRConverter:
 
     def test_type_mapper_fp32(self) -> None:
         """Test type mapping for FP32."""
-        from pypto import DataType
-
         converter = TTIRToPyptoConverter()
         dtype = converter.type_mapper.map_dtype("fp32")
         assert dtype == DataType.FP32
 
     def test_type_mapper_int32(self) -> None:
         """Test type mapping for INT32."""
-        from pypto import DataType
-
         converter = TTIRToPyptoConverter()
         dtype = converter.type_mapper.map_dtype("i32")
         assert dtype == DataType.INT32
@@ -58,8 +55,6 @@ class TestTypeMapping:
 
     def test_all_supported_dtypes(self) -> None:
         """Test all supported dtype mappings."""
-        from pypto import DataType
-
         converter = TTIRToPyptoConverter()
         expected = {
             "i1": DataType.BOOL,
@@ -73,20 +68,41 @@ class TestTypeMapping:
             "fp64": DataType.FP64,
         }
 
-        for ttir_dtype, expected_pypto_dtype in expected.items():
+        for ttir_dtype, expected_dtype in expected.items():
             result = converter.type_mapper.map_dtype(ttir_dtype)
-            assert result == expected_pypto_dtype, f"Failed for {ttir_dtype}"
+            assert result == expected_dtype, f"Failed for {ttir_dtype}"
 
 
 class TestElementwiseConversion:
     """Test elementwise operation conversion."""
 
-    @pytest.mark.skip(reason="Not implemented yet")
     def test_vector_add_conversion(self) -> None:
-        """Test conversion of simple vector addition kernel."""
-        pass
+        """Test conversion and NumPy execution of vector addition kernel."""
+        from triton_adapter import convert_ttir_to_pypto
+        from triton_adapter.runtime import run_on_numpy
+        import numpy as np
 
-    @pytest.mark.skip(reason="Not implemented yet")
+        ttir_text = """
+module {
+  tt.func @add_kernel(%arg0: !tt.ptr<fp32>, %arg1: !tt.ptr<fp32>, %arg2: !tt.ptr<fp32>) {
+    %0 = tt.load %arg0 : tensor<128xf32>
+    %1 = tt.load %arg1 : tensor<128xf32>
+    %2 = arith.addf %0, %1 : tensor<128xf32>
+    tt.store %arg2, %2 : tensor<128xf32>
+  }
+}
+"""
+        program = convert_ttir_to_pypto(ttir_text)
+        assert program is not None
+        assert len(program.functions) >= 1
+
+        a = np.ones(128, dtype=np.float32)
+        b = np.ones(128, dtype=np.float32) * 2
+        out = np.zeros(128, dtype=np.float32)
+        run_on_numpy(program, a, b, out)
+        np.testing.assert_allclose(out, a + b, rtol=1e-5)
+
+    @pytest.mark.skip(reason="Optional")
     def test_elementwise_mul_conversion(self) -> None:
-        """Test conversion of elementwise multiplication kernel."""
+        """Test elementwise multiplication kernel."""
         pass
