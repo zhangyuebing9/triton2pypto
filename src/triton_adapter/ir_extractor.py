@@ -2,15 +2,19 @@
 
 from typing import Any
 
-import triton
-from triton import ir as tir
+try:
+    import triton
+    from triton import ir as tir
+except ImportError:
+    triton = None  # type: ignore
+    tir = None  # type: ignore
 
 
 class IRExtractionError(Exception):
     """Raised when IR extraction fails."""
 
 
-def extract_ttir(kernel: triton.JITFunction, *args: Any, **kwargs: Any) -> tir.Module:
+def extract_ttir(kernel: Any, *args: Any, **kwargs: Any) -> Any:
     """Extract TTIR (Triton Tensor IR) from a compiled kernel.
 
     Args:
@@ -24,10 +28,12 @@ def extract_ttir(kernel: triton.JITFunction, *args: Any, **kwargs: Any) -> tir.M
     Raises:
         IRExtractionError: If extraction fails.
     """
+    if triton is None:
+        raise IRExtractionError("Triton is not installed. Please install triton to use IR extraction.")
     raise NotImplementedError("IR extraction not yet implemented")
 
 
-def extract_ttgir(kernel: triton.JITFunction, *args: Any, **kwargs: Any) -> tir.Module:
+def extract_ttgir(kernel: Any, *args: Any, **kwargs: Any) -> Any:
     """Extract TTGIR (Triton GPU IR) from a compiled kernel.
 
     Args:
@@ -41,4 +47,6 @@ def extract_ttgir(kernel: triton.JITFunction, *args: Any, **kwargs: Any) -> tir.
     Raises:
         IRExtractionError: If extraction fails.
     """
+    if triton is None:
+        raise IRExtractionError("Triton is not installed. Please install triton to use IR extraction.")
     raise NotImplementedError("IR extraction not yet implemented")
