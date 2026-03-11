@@ -141,7 +141,7 @@ class TestMLIRType:
 
         tensor_type_2d = MLIRType("tensor<128x64xf32>")
         shape_2d = tensor_type_2d.get_shape()
-        assert shape_2d == [128]
+        assert shape_2d == [128, 64]
 
     def test_get_element_type(self) -> None:
         """Test element type extraction."""

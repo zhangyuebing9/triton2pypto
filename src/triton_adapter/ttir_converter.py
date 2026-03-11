@@ -60,8 +60,8 @@ class TypeMapper:
         "f16": DataType.FP16,
         "fp32": DataType.FP32,
         "f32": DataType.FP32,
-        "fp64": DataType.FP64,
-        "f64": DataType.FP64,
+        "fp64": DataType.FP32,  # PyPTO 无 FP64，映射到 FP32
+        "f64": DataType.FP32,
     }
 
     def map_dtype(self, ttir_dtype: str) -> DataType:

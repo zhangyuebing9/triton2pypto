@@ -48,18 +48,29 @@ class TestTTIRConverter:
 
     def test_unsupported_operation_error(self) -> None:
         """Test that unsupported operations raise UnsupportedOpError."""
-        converter = TTIRToPyptoConverter()
-        with pytest.raises(UnsupportedOpError) as exc_info:
-            converter.convert_operation(type("Op", (), {"name": "tt.unsupported"}))
+        from triton_adapter.exceptions import UnsupportedOpError
 
-        assert "tt.unsupported" in str(exc_info.value)
+        ttir_with_unsupported = """
+module {
+  tt.func public @kernel(%arg0: !tt.ptr<f32>) {
+    %0 = tt.unsupported_op %arg0 : tensor<16xf32>
+    tt.return
+  }
+}
+"""
+        with pytest.raises(UnsupportedOpError) as exc_info:
+            TTIRToPyptoConverter().convert(ttir_with_unsupported, program_name="kernel")
+        assert "tt.unsupported_op" in str(exc_info.value)
 
 
 class TestTypeMapping:
     """Test type mapping functionality."""
 
     def test_all_supported_dtypes(self) -> None:
-        """Test all supported dtype mappings."""
+        """Test all supported dtype mappings.
+
+        Note: fp64 maps to FP32 since PyPTO may not support FP64.
+        """
         from pypto import DataType
 
         converter = TTIRToPyptoConverter()
@@ -72,7 +83,9 @@ class TestTypeMapping:
             "fp16": DataType.FP16,
             "bf16": DataType.BF16,
             "fp32": DataType.FP32,
-            "fp64": DataType.FP64,
+            "f32": DataType.FP32,
+            "fp64": DataType.FP32,  # PyPTO has no FP64, maps to FP32
+            "f64": DataType.FP32,
         }
 
         for ttir_dtype, expected_pypto_dtype in expected.items():

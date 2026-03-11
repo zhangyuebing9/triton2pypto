@@ -167,9 +167,12 @@ class TestCPUFunctional:
         def golden(tensors: dict, params: dict | None = None) -> None:
             tensors["out"][:] = tensors["a"] + tensors["b"]
 
+        # Use random init (same as run_elementwise_e2e) for consistent behavior
+        a_init = torch.randn(128, 128, dtype=torch.float32)
+        b_init = torch.randn(128, 128, dtype=torch.float32)
         tensor_specs = [
-            TensorSpec("a", [128, 128], torch.float32, init_value=2.0),
-            TensorSpec("b", [128, 128], torch.float32, init_value=3.0),
+            TensorSpec("a", [128, 128], torch.float32, init_value=a_init),
+            TensorSpec("b", [128, 128], torch.float32, init_value=b_init),
             TensorSpec("out", [128, 128], torch.float32, is_output=True),
         ]
 
