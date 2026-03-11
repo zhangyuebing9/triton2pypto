@@ -101,13 +101,63 @@ def main():
         print(f"    PyPTO 运行结果: {result}")
 
         if result.passed:
-            # golden = a+b，PyPTO 输出与 golden 一致即表示与 Triton add 结果一致
-            print("\n[5] 验证说明")
-            print("    golden 函数: out = a + b (与 Triton add kernel 数学等价)")
-            print("    PyPTO 通过 golden 校验 -> 转换结果与 Triton 一致")
-            print("\n" + "=" * 70)
-            print("✓ 验证通过: add 类型 elementwise 算子 Triton->PyPTO 转换与执行正确")
-            print("=" * 70)
+            # Triton TRITON_INTERPRET 执行（子进程，避免与 compile 冲突）
+            print("\n[5] Triton TRITON_INTERPRET 执行与结果对比")
+            import subprocess
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+                torch.save({"a": a_tensor, "b": b_tensor}, f.name)
+                data_path = f.name
+            try:
+                code = f"""
+import os
+os.environ["TRITON_INTERPRET"] = "1"
+import sys
+sys.path.insert(0, {repr(workspace)})
+import torch
+from examples.add_kernel_simple import add_kernel_simple
+
+data = torch.load({repr(data_path)})
+a, b = data["a"], data["b"]
+out = torch.empty_like(a)
+add_kernel_simple[(1,)](a, b, out)
+torch.save({{"out": out}}, {repr(data_path + ".out")})
+"""
+                r = subprocess.run(
+                    [sys.executable, "-c", code],
+                    env={**os.environ, "TRITON_INTERPRET": "1"},
+                    cwd=workspace,
+                    capture_output=True,
+                    text=True,
+                )
+                if r.returncode == 0:
+                    out_triton = torch.load(data_path + ".out")["out"]
+                    os.unlink(data_path + ".out")
+                    triton_vs_ref = (out_triton - reference).abs().max().item()
+                    print(f"    Triton 输出[:4] = {out_triton[:4].tolist()}")
+                    print(f"    参考 a+b[:4]     = {reference[:4].tolist()}")
+                    print(f"    Triton vs 参考 max diff: {triton_vs_ref:.2e}")
+                else:
+                    print(f"    Triton 执行失败: {r.stderr or r.stdout}")
+                    triton_vs_ref = float("inf")
+            finally:
+                os.unlink(data_path)
+
+            # PyPTO 通过 golden(a+b) 校验，等价于与 Triton 一致
+            print("\n[6] 综合验证")
+            print("    - PyPTO 输出 = golden(a,b) = a + b (result.passed)")
+            if triton_vs_ref < 1e-4:
+                print("    - Triton 输出 = a + b (triton_vs_ref < 1e-4)")
+                print("    -> 转换后 PyPTO 执行结果与 Triton 一致")
+                print("\n" + "=" * 70)
+                print("✓ 验证通过: add 类型 elementwise 算子 Triton->PyPTO 转换与 CPU 仿真执行正确")
+                print("=" * 70)
+            else:
+                print("    - Triton 输出校验:", "通过" if triton_vs_ref < 1e-4 else f"diff={triton_vs_ref}")
+                print("\n" + "=" * 70)
+                print("✓ PyPTO 验证通过 (golden 校验); Triton 对比:", "通过" if triton_vs_ref < 1e-4 else "未运行/失败")
+                print("=" * 70)
         else:
             print(f"    PyPTO 运行失败: {result.error}")
     except Exception as e:
