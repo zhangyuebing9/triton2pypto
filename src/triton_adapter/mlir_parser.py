@@ -5,7 +5,7 @@ specifically targeting TTIR operations needed for Phase 1.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 
 @dataclass
@@ -33,30 +33,45 @@ class MLIRType:
         """Check if this is a pointer type."""
         return "ptr" in self.type_str
 
-    def get_shape(self) -> Optional[List[int]]:
-        """Extract shape from tensor type if present."""
+    def get_shape(self) -> list[int] | None:
+        """Extract shape from tensor type if present.
+
+        Handles tensor<128xf32>, tensor<16x16xf32>, tensor<MxNxf32> (dynamic -> 1).
+        """
         if not self.is_tensor():
             return None
         try:
             start = self.type_str.index("<") + 1
-            end = self.type_str.index("x", start)
-            shape_str = self.type_str[start:end]
-            if shape_str == "?":
-                return [1]
-            return [int(shape_str)]
+            end = self.type_str.rindex(">")
+            inner = self.type_str[start:end]
+            # Split by 'x' but last part is dtype (e.g. f32, i32)
+            parts = inner.split("x")
+            if len(parts) < 2:
+                return None
+            shape: list[int] = []
+            for p in parts[:-1]:
+                p = p.strip()
+                if p == "?" or not p[0].isdigit():
+                    shape.append(1)  # Dynamic dim -> 1 for simplicity
+                else:
+                    shape.append(int(p))
+            return shape if shape else [1]
         except (ValueError, IndexError):
             return None
 
-    def get_element_type(self) -> Optional[str]:
+    def get_element_type(self) -> str | None:
         """Extract element type from tensor type."""
         if not self.is_tensor():
             return None
         try:
-            parts = self.type_str.split("x")
+            start = self.type_str.index("<") + 1
+            end = self.type_str.rindex(">")
+            inner = self.type_str[start:end]
+            parts = inner.split("x")
             if len(parts) >= 2:
-                return parts[-1].rstrip(">")
+                return parts[-1].strip().rstrip(",")
             return None
-        except IndexError:
+        except (ValueError, IndexError):
             return None
 
 
@@ -65,10 +80,10 @@ class MLIROperation:
     """Represents an MLIR operation."""
 
     name: str
-    result: Optional[MLIRValue]
-    operands: List[MLIRValue]
-    attributes: Dict[str, Any]
-    result_types: List[MLIRType]
+    result: MLIRValue | None
+    operands: list[MLIRValue]
+    attributes: dict[str, Any]
+    result_types: list[MLIRType]
 
     def __repr__(self) -> str:
         result_str = f"{self.result} = " if self.result else ""
@@ -80,9 +95,9 @@ class MLIRParser:
     """Simple MLIR text parser."""
 
     def __init__(self) -> None:
-        self.current_module: List[MLIROperation] = []
+        self.current_module: list[MLIROperation] = []
 
-    def parse_module(self, mlir_text: str) -> List[MLIROperation]:
+    def parse_module(self, mlir_text: str) -> list[MLIROperation]:
         """Parse MLIR module text.
 
         Args:
@@ -105,7 +120,7 @@ class MLIRParser:
 
         return self.current_module
 
-    def _parse_operation(self, line: str) -> Optional[MLIROperation]:
+    def _parse_operation(self, line: str) -> MLIROperation | None:
         """Parse a single MLIR operation line.
 
         Args:
@@ -119,7 +134,7 @@ class MLIRParser:
             return None
 
         result = None
-        result_types: List[MLIRType] = []
+        result_types: list[MLIRType] = []
 
         if "=" in line:
             result_part, op_part = line.split("=", 1)
@@ -136,11 +151,21 @@ class MLIRParser:
 
         op_name, operands, attributes = self._parse_op_body(line)
 
+        # Get result type from op body if not from result: "tt.load %arg0 : tensor<128xf32>"
+        if not result_types and ":" in line and "{" not in line.split(":")[0]:
+            type_part = line.split(":", 1)[1].strip()
+            if type_part and "<" in type_part:
+                # Extract type until balancing
+                end = type_part.find(">") + 1 if ">" in type_part else len(type_part)
+                type_str = type_part[:end].strip()
+                if type_str:
+                    result_types = [MLIRType(type_str)]
+
         return MLIROperation(
             name=op_name, result=result, operands=operands, attributes=attributes, result_types=result_types
         )
 
-    def _parse_value(self, value_str: str) -> Optional[MLIRValue]:
+    def _parse_value(self, value_str: str) -> MLIRValue | None:
         """Parse an MLIR value (e.g., %0, %x).
 
         Args:
@@ -160,32 +185,58 @@ class MLIRParser:
             return MLIRValue(name=name, type_str=type_str)
         return None
 
-    def _parse_op_body(self, line: str) -> Tuple[str, List[MLIRValue], Dict[str, Any]]:
+    def _parse_op_body(self, line: str) -> tuple[str, list[MLIRValue], dict[str, Any]]:
         """Parse operation name, operands, and attributes.
 
-        Args:
-            line: Operation body text.
-
-        Returns:
-            Tuple of (op_name, operands, attributes).
+        Handles both op(args) and op %operand : type formats.
         """
-        parts = line.split("(", 1)
-        op_name = parts[0].strip()
+        operands: list[MLIRValue] = []
+        attributes: dict[str, Any] = {}
 
-        operands: List[MLIRValue] = []
-        attributes: Dict[str, Any] = {}
+        # Handle attribute dict at end: {key = value}
+        if "{" in line:
+            attr_start = line.rfind("{")
+            attr_str = line[attr_start:].strip("{}")
+            attributes = self._parse_attributes(attr_str)
+            line = line[:attr_start].strip()
 
-        if len(parts) > 1:
-            body = parts[1].split(")")[0] if ")" in parts[1] else parts[1]
+        if "(" in line and line.find("(") < (line.find(":") if ":" in line else len(line)):
+            # op(args) format
+            paren = line.index("(")
+            op_name = line[:paren].strip()
+            body = line[paren + 1 : line.rfind(")")]
             operands = self._parse_operand_list(body)
-
-            if "{" in line:
-                attr_str = line.split("{")[1].split("}")[0]
-                attributes = self._parse_attributes(attr_str)
+        else:
+            # op %operand : type or op value : type format
+            parts = line.split(":", 1)
+            if len(parts) == 2 and parts[1].strip():
+                operand_part = parts[0].strip()
+                first_space = operand_part.find(" ")
+                if first_space > 0:
+                    op_name = operand_part[:first_space].strip()
+                    rest = operand_part[first_space:].strip()
+                    # For arith.constant, rest is the value (e.g. "1.0")
+                    if op_name == "arith.constant":
+                        attributes["value"] = rest
+                    else:
+                        operands = self._parse_operand_list(rest)
+                else:
+                    op_name = operand_part
+            else:
+                first_space = line.find(" ")
+                if first_space > 0:
+                    op_name = line[:first_space].strip()
+                    rest = line[first_space:].strip()
+                    if op_name == "arith.constant":
+                        attributes["value"] = rest
+                    else:
+                        operands = self._parse_operand_list(rest)
+                else:
+                    op_name = line.strip()
 
         return op_name, operands, attributes
 
-    def _parse_operand_list(self, operand_str: str) -> List[MLIRValue]:
+    def _parse_operand_list(self, operand_str: str) -> list[MLIRValue]:
         """Parse a comma-separated list of operands.
 
         Args:
@@ -194,7 +245,7 @@ class MLIRParser:
         Returns:
             List of parsed values.
         """
-        operands: List[MLIRValue] = []
+        operands: list[MLIRValue] = []
         for part in operand_str.split(","):
             part = part.strip()
             if part:
@@ -203,7 +254,7 @@ class MLIRParser:
                     operands.append(value)
         return operands
 
-    def _parse_attributes(self, attr_str: str) -> Dict[str, Any]:
+    def _parse_attributes(self, attr_str: str) -> dict[str, Any]:
         """Parse operation attributes.
 
         Args:
@@ -212,7 +263,7 @@ class MLIRParser:
         Returns:
             Dictionary of attributes.
         """
-        attributes: Dict[str, Any] = {}
+        attributes: dict[str, Any] = {}
         for pair in attr_str.split(","):
             if "=" in pair:
                 key, value = pair.split("=", 1)
@@ -220,7 +271,7 @@ class MLIRParser:
         return attributes
 
 
-def parse_ttir(ttir_text: str) -> List[MLIROperation]:
+def parse_ttir(ttir_text: str) -> list[MLIROperation]:
     """Parse TTIR MLIR text.
 
     Args:

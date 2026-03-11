@@ -1,11 +1,15 @@
 """Triton IR extraction and transformation."""
 
-from .ir_extractor import extract_ttir, extract_ttgir
+from .exceptions import ConversionError, UnsupportedOpError
+from .ir_extractor import IRExtractionError, extract_ttgir, extract_ttir
 from .mlir_parser import MLIROperation, MLIRParser, MLIRType, MLIRValue, parse_ttir
 
 __all__ = [
+    "ConversionError",
+    "UnsupportedOpError",
     "extract_ttir",
     "extract_ttgir",
+    "IRExtractionError",
     "parse_ttir",
     "MLIRParser",
     "MLIROperation",
@@ -14,22 +18,20 @@ __all__ = [
 ]
 
 try:
-    from .ttir_converter import (
-        BlockPtrInfo,
-        ConversionError,
-        SpanTracker,
-        TTIRToPyptoConverter,
-        TypeMapper,
-        UnsupportedOpError,
-    )
+    from .converter import convert_ttir_to_pypto
+    from .ttir_converter import BlockPtrInfo, SpanTracker, TTIRToPyptoConverter, TypeMapper
 
     __all__.extend([
         "TTIRToPyptoConverter",
         "TypeMapper",
         "SpanTracker",
         "BlockPtrInfo",
-        "ConversionError",
-        "UnsupportedOpError",
+        "convert_ttir_to_pypto",
     ])
-except ImportError:
-    pass
+except ImportError as e:
+    import warnings
+
+    warnings.warn(
+        f"triton_adapter converter not available: {e}", ImportWarning, stacklevel=2
+    )
+

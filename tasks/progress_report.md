@@ -70,28 +70,37 @@ tasks/
 | arith.select | 框架就绪 | 需实现转换逻辑 |
 | tt.program_id | 框架就绪 | 需实现转换逻辑 |
 
+## 已完成（Phase 1 实现）
+
+### 核心转换逻辑 ✅
+1. **常量转换** (arith.constant) - 已实现
+2. **算术运算** (addf/subf/mulf/divf, addi/subi/muli/divi) - 已实现
+3. **内存操作** (load/store) - 已实现 tile.load / tile.store
+4. **块指针处理** (make_block_ptr/advance) - 框架就绪
+5. **扩展算子** (tt.exp, arith.cmpf/select, tt.program_id) - 已实现
+
+### CPU 功能测试 ✅
+- 支持 SIMPLER_ROOT 指向 third_party/simpler 进行 a2a3sim CPU 仿真
+- 测试: tests/test_phase1_functional.py
+- PyPTO IR 使用 submodule 中的 pypto，Triton IR 使用 submodule 中的 triton
+
+### 环境配置
+```bash
+# 安装 PyPTO（使用 submodule）
+pip install -e third_party/pypto
+
+# 安装 triton2pypto
+pip install -e .
+
+# 设置 SIMPLER_ROOT 用于 CPU 仿真测试
+export SIMPLER_ROOT=$(pwd)/third_party/simpler
+```
+
 ## 下一步工作
 
-### 优先级 1：核心转换逻辑
-1. **常量转换** (arith.constant)
-   - 解析常量值
-   - 创建 PyPTO 常量表达式
-
-2. **算术运算** (addf/subf/mulf/divf)
-   - 实现二元操作转换
-   - 使用 PyPTO tile 操作
-
-3. **内存操作** (load/store)
-   - 实现 tile.load 转换
-   - 实现 tile.store 转换
-
-### 优先级 2：高级功能
-4. **块指针处理** (make_block_ptr/advance)
-   - 追踪块指针信息
-   - 处理指针算术
-
-5. **调度参数** (program_id)
-   - 映射到函数参数
+### 优先级 2：端到端验证
+- Triton kernel → extract_ttir → convert_ttir_to_pypto → 编译运行
+- 完善 TTIR 解析以处理实际 Triton 生成的复杂格式
 
 ## 技术决策
 
