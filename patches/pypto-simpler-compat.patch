@@ -1,0 +1,14 @@
+diff --git a/src/codegen/orchestration/orchestration_codegen.cpp b/src/codegen/orchestration/orchestration_codegen.cpp
+index 943fb43..67933f5 100644
+--- a/src/codegen/orchestration/orchestration_codegen.cpp
++++ b/src/codegen/orchestration/orchestration_codegen.cpp
+@@ -905,7 +905,8 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
+   oss << "__attribute__((visibility(\"default\")))\n";
+   oss << "void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {\n";
+   oss << "    (void)arg_count;\n";
+-  oss << "    pto2_rt_init_tensor_pool(rt);  // Initialize TensorPool singleton\n\n";
++  // pto2_rt_init_tensor_pool removed for simpler a2a3sim compatibility
++  // oss << "    pto2_rt_init_tensor_pool(rt);  // Initialize TensorPool singleton\n\n";
+ 
+   // 7. Extract arguments
+   oss << "    // Extract device pointers\n";

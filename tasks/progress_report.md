@@ -117,11 +117,30 @@ PYTHONPATH=/workspace/src:/workspace python examples/run_triton_to_pypto_e2e.py
 export SIMPLER_ROOT=$(pwd)/third_party/simpler
 ```
 
+## 已完成（elementwise + reduce + matmul）
+
+### 算子支持扩展 ✅
+- **Elementwise**: add, sub, mul, div, exp（含 math.exp → tile.exp）
+- **Reduce**: tt.reduce → tile.row_sum / tile.row_max（含 1D→2D reshape）
+- **Matmul**: tt.dot → tile.matmul / tile.matmul_acc
+- **辅助**: tt.expand_dims, tt.broadcast, tt.make_range, arith.muli/addi 标量处理, dense 张量常量
+
+### 示例与测试 ✅
+- `examples/sub_kernel_simple.py`, `mul_kernel_simple.py`, `div_kernel_simple.py`, `exp_kernel_simple.py`
+- `examples/reduce_sum_kernel_simple.py`, `matmul_kernel_simple.py`
+- `tests/test_triton_to_pypto_e2e.py`: 各算子转换 + 编译测试
+
+### CPU 仿真执行验证 ✅
+- **PyPTO-simpler 兼容性**：`scripts/apply_pypto_patches.sh` 应用 `pto2_rt_init_tensor_pool` 移除补丁
+- **执行测试通过**：add/sub/mul/div、reduce_sum、matmul 与参考（Python 运算）一致
+- **exp 执行测试**：暂跳过（2-param orchestration 待调查）
+- **run_triton_to_pypto_e2e.py**：add 端到端验证，含 Triton TRITON_INTERPRET 对比
+
 ## 下一步工作
 
 ### 优先级 2：扩展与优化
 - 支持带 mask 的 add kernel（更复杂 TTIR）
-- 处理 simpler orchestration 编译兼容性（pto2_rt_init_tensor_pool 等）
+- exp 执行测试：2-param orchestration 与 simpler 集成
 
 ## 技术决策
 
