@@ -274,10 +274,12 @@ pypto is a C++ extension built with scikit-build-core + nanobind. Building takes
    export SIMPLER_ROOT=$(pwd)/third_party/simpler
    ```
 
-2. **PyPTO orchestration 兼容性**：本仓库的 pypto 子模块已修改，移除了 `pto2_rt_init_tensor_pool` 调用，以兼容 simpler a2a3sim。修改后需重建 pypto：
-   ```bash
-   cd third_party/pypto && pip install -e . && cd ../..
-   ```
+2. **PyPTO orchestration 兼容性**：simpler a2a3sim 需要移除 `pto2_rt_init_tensor_pool` 调用。初始化子模块后执行：
+ ```bash
+ git submodule update --init third_party/pypto
+ ./scripts/apply_pypto_patches.sh
+ cd third_party/pypto && pip install -e . && cd ../..
+ ```
 
 3. **运行 E2E 验证**：
    ```bash
