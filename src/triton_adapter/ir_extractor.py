@@ -7,19 +7,63 @@ from typing import Any
 
 try:
     import triton
+    from triton.compiler import ASTSource
+    from triton.backends.compiler import GPUTarget
 except ImportError:
     triton = None  # type: ignore
+    ASTSource = None  # type: ignore
+    GPUTarget = None  # type: ignore
 
 
 class IRExtractionError(Exception):
     """Raised when IR extraction fails."""
 
 
-def extract_ttir(kernel: Any, *args: Any, **kwargs: Any) -> str:
-    """Extract TTIR (Triton Tensor IR) text from a compiled Triton kernel.
+def _infer_signature_and_constexprs(kernel: Any, args: tuple, kwargs: dict) -> tuple[dict, dict]:
+    """Infer ASTSource signature and constexprs from kernel and call args."""
+    import torch
 
-    The kernel must be compiled first by running it with concrete arguments.
-    Use TRITON_INTERPRET=1 for CPU-only execution without GPU.
+    sig: dict[str, str] = {}
+    constexprs: dict[str, Any] = {}
+    arg_names = getattr(kernel, "arg_names", []) or []
+
+    for i, name in enumerate(arg_names):
+        if i >= len(args):
+            break
+        val = args[i]
+        if type(val).__name__ == "constexpr":
+            constexprs[name] = val.value
+            sig[name] = "i32"  # constexpr often used as size
+        elif hasattr(val, "data_ptr") and hasattr(val, "dtype"):
+            # torch.Tensor
+            dt = val.dtype
+            if dt == torch.float32:
+                sig[name] = "*fp32"
+            elif dt == torch.float16:
+                sig[name] = "*fp16"
+            elif dt == torch.bfloat16:
+                sig[name] = "*bf16"
+            elif dt == torch.int32:
+                sig[name] = "*i32"
+            elif dt == torch.int64:
+                sig[name] = "*i64"
+            else:
+                sig[name] = "*fp32"  # default
+        elif isinstance(val, int):
+            constexprs[name] = val
+            sig[name] = "i32"
+        else:
+            sig[name] = "*fp32"  # fallback for pointers
+    return sig, constexprs
+
+
+def extract_ttir(kernel: Any, *args: Any, **kwargs: Any) -> str:
+    """Extract TTIR (Triton Tensor IR) text from a Triton kernel.
+
+    Two extraction paths:
+    1. Run path: kernel[grid](*args) when GPU/driver is available - returns asm["ttir"]
+    2. Compile-only path: triton.compile(ASTSource(...), target=GPUTarget(...)) when no GPU
+       (e.g. TRITON_INTERPRET=1 or CI without GPU). Infers signature from args.
 
     Args:
         kernel: A Triton JITFunction (e.g. @triton.jit decorated function).
@@ -35,14 +79,7 @@ def extract_ttir(kernel: Any, *args: Any, **kwargs: Any) -> str:
     Example:
         >>> @triton.jit
         ... def add_kernel(x, y, out, n: tl.constexpr):
-        ...     idx = tl.program_id(0) * 128 + tl.arange(0, 128)
-        ...     mask = idx < n
-        ...     a = tl.load(x + idx, mask=mask)
-        ...     b = tl.load(y + idx, mask=mask)
-        ...     tl.store(out + idx, a + b, mask=mask)
-        >>> x = torch.randn(256)
-        >>> y = torch.randn(256)
-        >>> out = torch.empty(256)
+        ...     ...
         >>> ttir_text = extract_ttir(add_kernel, x, y, out, 256)
     """
     if triton is None:
@@ -50,26 +87,27 @@ def extract_ttir(kernel: Any, *args: Any, **kwargs: Any) -> str:
             "Triton is not installed. Please install triton to use IR extraction."
         )
 
+    grid = kwargs.get("grid", (1,))
+
+    # Path 1: Try run to get compiled kernel (requires GPU)
     try:
-        # Launch kernel to trigger compilation; returns compiled binary with asm
-        grid = kwargs.get("grid", (1,))
-
-        # Call kernel to compile; use minimal grid for compilation
-        # kernel[(grid)](*args, **kwargs) compiles and runs; we need the compiled object
         compiled = kernel[grid](*args, **kwargs)
+        if compiled is not None and hasattr(compiled, "asm") and compiled.asm and "ttir" in compiled.asm:
+            return compiled.asm["ttir"]
+    except (RuntimeError, Exception):
+        pass  # Fall through to compile-only path
 
-        if not hasattr(compiled, "asm") or "ttir" not in compiled.asm:
-            raise IRExtractionError(
-                "Compiled kernel does not expose ttir. "
-                "Ensure Triton version supports asm['ttir']."
-            )
-
+    # Path 2: Compile-only (no GPU / TRITON_INTERPRET)
+    sig, constexprs = _infer_signature_and_constexprs(kernel, args, kwargs)
+    src = ASTSource(fn=kernel, signature=sig, constexprs=constexprs)
+    target = GPUTarget("cuda", 80, 32)  # SM80 works for most ops
+    compiled = triton.compile(src, target=target)
+    if hasattr(compiled, "asm") and "ttir" in compiled.asm:
         return compiled.asm["ttir"]
 
-    except IRExtractionError:
-        raise
-    except Exception as e:
-        raise IRExtractionError(f"Failed to extract TTIR: {e}") from e
+    raise IRExtractionError(
+        "Failed to extract TTIR. Neither run nor compile-only path produced ttir."
+    )
 
 
 def extract_ttgir(kernel: Any, *args: Any, **kwargs: Any) -> Any:
