@@ -85,6 +85,10 @@ class TTIRToPyptoConverter:
     SUPPORTED_OPS = {
         "tt.make_block_ptr",
         "tt.advance",
+        "tt.splat",
+        "tt.addptr",
+        "tt.make_range",
+        "tt.get_program_id",
         "tt.load",
         "tt.store",
         "arith.addf",
@@ -96,11 +100,15 @@ class TTIRToPyptoConverter:
         "arith.divf",
         "arith.divi",
         "arith.constant",
+        "arith.muli",
+        "arith.addi",
+        "arith.cmpi",
         "tt.exp",
         "arith.cmpf",
         "arith.cmpi",
         "arith.select",
         "tt.program_id",
+        "tt.get_program_id",
     }
 
     def __init__(self) -> None:
@@ -109,6 +117,7 @@ class TTIRToPyptoConverter:
         self.span_tracker = SpanTracker()
         self.value_map: dict[str, ir.Var] = {}
         self.block_ptr_map: dict[str, BlockPtrInfo] = {}
+        self.ptr_trace: dict[str, str] = {}  # value -> base (for splat+addptr chain)
         self._tmp_counter = 0
         self.span = ir.Span.unknown()
         self._last_store_result: ir.Expr | None = None
@@ -220,6 +229,7 @@ class TTIRToPyptoConverter:
 
         self.value_map.clear()
         self.block_ptr_map.clear()
+        self.ptr_trace.clear()
         self._last_store_result = None
 
         tensor_type = ir.TensorType(shape, dtype)
@@ -288,13 +298,12 @@ class TTIRToPyptoConverter:
             shape = [shape[0], 1]
 
         tensor_type = ir.TensorType(shape, dtype)
+        pnames = [n.lstrip("%") for n in arg_names[:3]]
         with self.ib.function(
             "main", type=ir.FunctionType.Orchestration
         ) as f:
-            a = f.param("a", tensor_type)
-            b = f.param("b", tensor_type)
-            c = f.param("c", tensor_type)
-            out = ir.Call(ir.GlobalVar(incore_func.name), [a, b, c], self.span)
+            params = [f.param(pnames[i] if i < len(pnames) else f"arg{i}", tensor_type) for i in range(3)]
+            out = ir.Call(ir.GlobalVar(incore_func.name), params, self.span)
             self.ib.return_stmt(out)
         return f.get_result()
 
@@ -343,12 +352,48 @@ class TTIRToPyptoConverter:
                 except ValueError:
                     pass
 
+    def _convert_tt_splat(self, op: MLIROperation) -> None:
+        """Track tt.splat: ptr_trace[result] = base (operand)."""
+        if not op.result or not op.operands:
+            return
+        base_key = self._value_key(op.operands[0])
+        result_key = self._value_key(op.result)
+        self.ptr_trace[result_key] = base_key
+        # Splat produces a tensor of ptrs; we map result to base for load/store
+        self.value_map[result_key] = self._get_operand(op.operands[0])
+
+    def _convert_tt_addptr(self, op: MLIROperation) -> None:
+        """Track tt.addptr: ptr_trace[result] = base from first operand's trace."""
+        if not op.result or len(op.operands) < 2:
+            return
+        ptr_key = self._value_key(op.operands[0])
+        base_key = self.ptr_trace.get(ptr_key, ptr_key)
+        result_key = self._value_key(op.result)
+        self.ptr_trace[result_key] = base_key
+        self.value_map[result_key] = self._get_operand(op.operands[0])
+
+    def _convert_tt_make_range(self, op: MLIROperation) -> None:
+        """tt.make_range produces indices - no PyPTO equivalent; skip or use const."""
+        if not op.result:
+            return
+        # For elementwise add we don't need the range value; load uses base+offsets
+        pass
+
+    def _convert_tt_get_program_id(self, op: MLIROperation) -> None:
+        """Convert tt.get_program_id to pid param (like tt.program_id)."""
+        self._convert_tt_program_id(op)
+
     def _convert_tt_load(self, op: MLIROperation) -> None:
         """Convert tt.load to tile.load."""
         if not op.result or not op.operands:
             return
         ptr = op.operands[0]
-        tensor_var = self._get_operand(ptr)
+        ptr_key = self._value_key(ptr)
+        base_key = self.ptr_trace.get(ptr_key, ptr_key)
+        tensor_var = self.value_map.get(base_key)
+        if tensor_var is None:
+            tensor_var = self._get_operand(ptr)
+        # Infer shape from result type or operand type
         shape = [128, 128]
         if op.result_types:
             rt = op.result_types[0]
@@ -356,8 +401,14 @@ class TTIRToPyptoConverter:
                 s = rt.get_shape()
                 if s:
                     shape = s
+        if not shape and op.operands:
+            ot = getattr(op.operands[0], "type_str", "") or ""
+            if "tensor<128x" in ot or "tensor<128 " in ot:
+                shape = [128]
         if len(shape) == 1:
             shape = [shape[0], 1]
+        elif len(shape) > 2:
+            shape = shape[:2]
         offsets = [0] * len(shape)
         load_call = tile.load(
             tensor_var, offsets, shape, span=self.span
@@ -374,7 +425,11 @@ class TTIRToPyptoConverter:
             return
         ptr = op.operands[0]
         value = op.operands[1]
-        output_var = self._get_operand(ptr)
+        ptr_key = self._value_key(ptr)
+        base_key = self.ptr_trace.get(ptr_key, ptr_key)
+        output_var = self.value_map.get(base_key)
+        if output_var is None:
+            output_var = self._get_operand(ptr)
         tile_var = self._get_operand(value)
         shape = [128, 128]
         if op.result_types:

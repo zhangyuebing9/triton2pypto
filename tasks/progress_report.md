@@ -96,11 +96,32 @@ pip install -e .
 export SIMPLER_ROOT=$(pwd)/third_party/simpler
 ```
 
+## 已完成（本次）
+
+### 端到端 add elementwise 流程 ✅
+- **extract_ttir**: 支持 compile-only 路径（无 GPU 时用 triton.compile + ASTSource）
+- **MLIR 解析**: 支持真实 TTIR（tt.splat, tt.addptr, tt.make_range, tt.func 嵌套括号）
+- **转换器**: 支持 tt.splat/addptr 指针链追踪，正确映射 load/store 的 base
+- **测试**: tests/test_triton_to_pypto_e2e.py
+  - test_extract_ttir_from_triton_source
+  - test_extract_ttir_api（extract_ttir + convert 流程）
+  - test_convert_real_ttir_to_pypto（转换 + PyPTO 编译）
+  - test_triton_add_to_pypto_run_cpu（需 SIMPLER_ROOT，simpler 环境）
+
+### 使用方式
+```bash
+# 转换 + 编译（无需 GPU）
+PYTHONPATH=/workspace/src:/workspace python examples/run_triton_to_pypto_e2e.py
+
+# 运行 simpler CPU 仿真需 SIMPLER_ROOT 且 simpler 环境正确
+export SIMPLER_ROOT=$(pwd)/third_party/simpler
+```
+
 ## 下一步工作
 
-### 优先级 2：端到端验证
-- Triton kernel → extract_ttir → convert_ttir_to_pypto → 编译运行
-- 完善 TTIR 解析以处理实际 Triton 生成的复杂格式
+### 优先级 2：扩展与优化
+- 支持带 mask 的 add kernel（更复杂 TTIR）
+- 处理 simpler orchestration 编译兼容性（pto2_rt_init_tensor_pool 等）
 
 ## 技术决策
 

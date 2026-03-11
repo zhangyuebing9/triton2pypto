@@ -244,6 +244,10 @@ PYTHONPATH=/workspace/src pytest tests/test_mlir_parser.py tests/test_ir_extract
 
 # Reinstall pypto after testing:
 cd /workspace/third_party/pypto && pip install -e . && cd /workspace
+
+# Run Triton->PyPTO E2E 测试（含 simpler CPU 仿真需 SIMPLER_ROOT）:
+export SIMPLER_ROOT=$(pwd)/third_party/simpler
+PYTHONPATH=/workspace/src:/workspace pytest tests/test_triton_to_pypto_e2e.py -v
 ```
 
 Pre-existing test failures (8 pass / 8 fail out of 16) are due to MLIR parser op-name extraction bugs and triton.ir unavailability—not environment issues.
@@ -260,3 +264,30 @@ mypy src/                 # type check (passes clean)
 ### Building pypto from source
 
 pypto is a C++ extension built with scikit-build-core + nanobind. Building takes ~70s. Requires `python3-dev` system package. The update script handles this automatically.
+
+### Simpler 环境配置（PyPTO + simpler CPU 仿真）
+
+用于 Triton->PyPTO 转换后的 CPU 仿真执行与结果校验。
+
+1. **设置 SIMPLER_ROOT**（必须）：
+   ```bash
+   export SIMPLER_ROOT=$(pwd)/third_party/simpler
+   ```
+
+2. **PyPTO orchestration 兼容性**：本仓库的 pypto 子模块已修改，移除了 `pto2_rt_init_tensor_pool` 调用，以兼容 simpler a2a3sim。修改后需重建 pypto：
+   ```bash
+   cd third_party/pypto && pip install -e . && cd ../..
+   ```
+
+3. **运行 E2E 验证**：
+   ```bash
+   source .venv/bin/activate
+   export SIMPLER_ROOT=$(pwd)/third_party/simpler
+   PYTHONPATH=/workspace/src:/workspace python examples/run_triton_to_pypto_e2e.py
+   ```
+
+4. **运行带 simpler 的测试**：
+   ```bash
+   export SIMPLER_ROOT=$(pwd)/third_party/simpler
+   PYTHONPATH=/workspace/src:/workspace pytest tests/test_triton_to_pypto_e2e.py::TestTritonToPyPTOExecution -v
+   ```

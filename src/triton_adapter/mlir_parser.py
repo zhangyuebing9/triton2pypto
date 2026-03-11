@@ -109,13 +109,53 @@ class MLIRParser:
         self.current_module = []
         lines = mlir_text.strip().split("\n")
 
+        # First pass: extract tt.func args from "tt.func public @name(%a: type, %b: type)"
+        import re as _re
+        for line in lines:
+            if "tt.func" in line and "@" in line and "(" in line:
+                idx = line.find("@")
+                if idx < 0:
+                    continue
+                m = _re.match(r"@(\w+)\s*\(", line[idx:])
+                if m:
+                    func_name = m.group(1)
+                    paren_start = line.index("(", idx)
+                    depth = 1
+                    i = paren_start + 1
+                    while i < len(line) and depth > 0:
+                        if line[i] == "(":
+                            depth += 1
+                        elif line[i] == ")":
+                            depth -= 1
+                        i += 1
+                    args_str = line[paren_start + 1 : i - 1]
+                    arg_names = []
+                    for match in _re.finditer(r"%(\w+)\s*:", args_str):
+                        arg_names.append(MLIRValue(match.group(1), ""))
+                    if arg_names:
+                        fake_op = MLIROperation(
+                            name="tt.func",
+                            result=None,
+                            operands=arg_names,
+                            attributes={"sym_name": func_name},
+                            result_types=[],
+                        )
+                        self.current_module.append(fake_op)
+                break
+
         for line in lines:
             line = line.strip()
-            if not line or line.startswith("//") or line.startswith("module") or line.startswith("}"):
+            if not line or line.startswith("//") or line.startswith("#"):
+                continue
+            if line in ("module", "module {", "}"):
+                continue
+            if "tt.func" in line and "=" not in line:
+                continue  # Already handled above
+            if line.endswith("attributes {") or line == "}":
                 continue
 
             op = self._parse_operation(line)
-            if op:
+            if op and not op.name.endswith("}"):
                 self.current_module.append(op)
 
         return self.current_module
@@ -215,9 +255,15 @@ class MLIRParser:
                 if first_space > 0:
                     op_name = operand_part[:first_space].strip()
                     rest = operand_part[first_space:].strip()
-                    # For arith.constant, rest is the value (e.g. "1.0")
+                    # For arith.constant, rest is the value (e.g. "1.0", "dense<256>")
                     if op_name == "arith.constant":
-                        attributes["value"] = rest
+                        import re as _re
+                        val = rest.split(":")[0].strip()
+                        if "dense<" in val:
+                            m = _re.search(r"dense<([^>]+)>", val)
+                            if m:
+                                val = m.group(1)
+                        attributes["value"] = val
                     else:
                         operands = self._parse_operand_list(rest)
                 else:
