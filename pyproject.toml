@@ -25,6 +25,8 @@ classifiers = [
 
 dependencies = [
     "triton>=3.0.0",
+    "pypto",
+    "torch",
 ]
 
 [project.optional-dependencies]
@@ -58,6 +60,9 @@ ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["triton_adapter", "pypto_backend", "passes"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/triton_adapter/__init__.py" = ["F401"]
 
 [tool.mypy]
 python_version = "3.10"

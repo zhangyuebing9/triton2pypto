@@ -2,6 +2,8 @@
 
 import pytest
 
+pytest.importorskip("pypto", reason="PyPTO required - pip install pypto or use submodule")
+
 from triton_adapter import ConversionError, TTIRToPyptoConverter, UnsupportedOpError
 
 
