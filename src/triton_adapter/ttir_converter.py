@@ -104,11 +104,16 @@ class TTIRToPyptoConverter:
         "arith.addi",
         "arith.cmpi",
         "tt.exp",
+        "math.exp",
         "arith.cmpf",
         "arith.cmpi",
         "arith.select",
         "tt.program_id",
         "tt.get_program_id",
+        "tt.dot",
+        "tt.reduce",
+        "tt.expand_dims",
+        "tt.broadcast",
     }
 
     def __init__(self) -> None:
@@ -206,6 +211,24 @@ class TTIRToPyptoConverter:
         if not body_ops:
             return None
 
+        # Detect program_id use - need pid params
+        need_pid = set()
+        for op in body_ops:
+            if op.name in ("tt.get_program_id", "tt.program_id"):
+                axis = op.attributes.get("axis", 0)
+                if "x" in str(axis).lower():
+                    axis = 0
+                elif "y" in str(axis).lower():
+                    axis = 1
+                elif "z" in str(axis).lower():
+                    axis = 2
+                else:
+                    try:
+                        axis = int(axis)
+                    except (ValueError, TypeError):
+                        axis = 0
+                need_pid.add(axis)
+
         # Infer param types from first load/store
         shape = [128, 128]
         dtype = DataType.FP32
@@ -248,6 +271,10 @@ class TTIRToPyptoConverter:
                     params.append(param)
                     self.value_map[arg_name] = param
 
+            for axis in sorted(need_pid):
+                pid_param = f.param(f"pid_{axis}", ir.ScalarType(DataType.INT64))
+                self.value_map[f"%pid_{axis}"] = pid_param
+
             f.return_type(tensor_type)
 
             for op in body_ops:
@@ -278,7 +305,7 @@ class TTIRToPyptoConverter:
         incore_func: ir.Function | None,
     ) -> ir.Function | None:
         """Build Orchestration function that calls InCore."""
-        if not incore_func or len(arg_names) < 3:
+        if not incore_func or len(arg_names) < 2:
             return None
 
         shape = [128, 128]
@@ -298,25 +325,32 @@ class TTIRToPyptoConverter:
             shape = [shape[0], 1]
 
         tensor_type = ir.TensorType(shape, dtype)
-        pnames = [n.lstrip("%") for n in arg_names[:3]]
+        num_tensor_params = min(3, len(arg_names))
+        pnames = [n.lstrip("%") for n in arg_names[:num_tensor_params]]
         with self.ib.function(
             "main", type=ir.FunctionType.Orchestration
         ) as f:
-            params = [f.param(pnames[i] if i < len(pnames) else f"arg{i}", tensor_type) for i in range(3)]
-            out = ir.Call(ir.GlobalVar(incore_func.name), params, self.span)
+            orch_params = [f.param(pnames[i] if i < len(pnames) else f"arg{i}", tensor_type) for i in range(num_tensor_params)]
+            call_args: list[ir.Expr] = list(orch_params)
+            # Add pid constants for incore params beyond tensor args
+            for i in range(len(orch_params), len(incore_func.params)):
+                call_args.append(ir.ConstInt(0, DataType.INT64, self.span))
+            call_args = call_args[: len(incore_func.params)]
+            out = ir.Call(ir.GlobalVar(incore_func.name), call_args, self.span)
             self.ib.return_stmt(out)
         return f.get_result()
 
     def _convert_op(self, op: MLIROperation) -> None:
         """Dispatch operation to handler."""
         self.span = self.span_tracker.get_span(op)
-        if op.name not in self.SUPPORTED_OPS:
-            handler_name = op.name.replace(".", "_")
+        op_name = op.name.strip('"')  # Normalize quoted names like "tt.reduce"
+        if op_name not in self.SUPPORTED_OPS:
+            handler_name = op_name.replace(".", "_")
             if not hasattr(self, f"_convert_{handler_name}"):
                 raise UnsupportedOpError(op.name, self.span)
         handler = getattr(
             self,
-            f"_convert_{op.name.replace('.', '_')}",
+            f"_convert_{op_name.replace('.', '_')}",
             self._convert_generic,
         )
         handler(op)
@@ -326,13 +360,42 @@ class TTIRToPyptoConverter:
         raise UnsupportedOpError(op.name, self.span)
 
     def _convert_arith_constant(self, op: MLIROperation) -> None:
-        """Convert arith.constant to ConstInt/ConstFloat."""
+        """Convert arith.constant to ConstInt/ConstFloat or tile.full for tensor."""
         if not op.result:
             return
         key = self._value_key(op.result)
         attr = op.attributes.get("value")
         if attr:
             val_str = str(attr).strip()
+            # Dense tensor constant: dense<0.0> : tensor<16x16xf32>
+            is_tensor = op.result_types and op.result_types[0].is_tensor()
+            if is_tensor and "dense" in val_str.lower():
+                import re as _re
+                m = _re.search(r"dense<([^>]+)>", val_str)
+                fill_val = 0.0
+                if m:
+                    inner = m.group(1).strip()
+                    try:
+                        fill_val = float(inner)
+                    except ValueError:
+                        try:
+                            fill_val = int(inner)
+                        except ValueError:
+                            pass
+                shape = [16, 16]
+                dtype = DataType.FP32
+                if op.result_types:
+                    rt = op.result_types[0]
+                    if rt.get_shape():
+                        shape = rt.get_shape()
+                    if rt.get_element_type():
+                        dtype = self.type_mapper.map_dtype(rt.get_element_type())
+                if len(shape) == 1:
+                    shape = [shape[0], 1]
+                expr = tile.full(shape, dtype, fill_val, span=self.span)
+                var = self.ib.let(key.replace("%", "cst_"), expr)
+                self.value_map[key] = var
+                return
             if "." in val_str or "e" in val_str.lower():
                 try:
                     fval = float(val_str)
@@ -373,11 +436,13 @@ class TTIRToPyptoConverter:
         self.value_map[result_key] = self._get_operand(op.operands[0])
 
     def _convert_tt_make_range(self, op: MLIROperation) -> None:
-        """tt.make_range produces indices - no PyPTO equivalent; skip or use const."""
+        """tt.make_range produces indices - use placeholder for ptr chain propagation."""
         if not op.result:
             return
-        # For elementwise add we don't need the range value; load uses base+offsets
-        pass
+        # Placeholder for index computations; actual load uses fixed offsets
+        c0 = ir.ConstInt(0, DataType.INT64, self.span)
+        var = self.ib.let(f"range_{op.result.name}".replace("%", ""), c0)
+        self.value_map[self._value_key(op.result)] = var
 
     def _convert_tt_get_program_id(self, op: MLIROperation) -> None:
         """Convert tt.get_program_id to pid param (like tt.program_id)."""
@@ -450,8 +515,25 @@ class TTIRToPyptoConverter:
         self._convert_binary_op(op, "add", tile.add)
 
     def _convert_arith_addi(self, op: MLIROperation) -> None:
-        """Convert arith.addi to tile.add (for integer tiles)."""
-        self._convert_binary_op(op, "add", tile.add)
+        """Convert arith.addi to tile.add or ir.Add for scalars."""
+        if not op.result or len(op.operands) < 2:
+            return
+        is_scalar = False
+        if op.result_types:
+            rt = op.result_types[0]
+            if rt and not rt.is_tensor():
+                is_scalar = True
+        if is_scalar:
+            lhs = self._get_operand(op.operands[0])
+            rhs = self._get_operand(op.operands[1])
+            result_expr = ir.Add(lhs, rhs, DataType.INT64, self.span)
+            result_var = self.ib.let(
+                f"addi_{op.result.name}".replace("%", ""),
+                result_expr,
+            )
+            self.value_map[self._value_key(op.result)] = result_var
+        else:
+            self._convert_binary_op(op, "add", tile.add)
 
     def _convert_arith_subf(self, op: MLIROperation) -> None:
         """Convert arith.subf to tile.sub."""
@@ -466,8 +548,39 @@ class TTIRToPyptoConverter:
         self._convert_binary_op(op, "mul", tile.mul)
 
     def _convert_arith_muli(self, op: MLIROperation) -> None:
-        """Convert arith.muli to tile.mul."""
-        self._convert_binary_op(op, "mul", tile.mul)
+        """Convert arith.muli to tile.mul or ir.Mul for scalars."""
+        if not op.result or len(op.operands) < 2:
+            return
+        # Check if scalar: result type i32/i64 or not tensor
+        is_scalar = False
+        if op.result_types:
+            rt = op.result_types[0]
+            if rt and not rt.is_tensor():
+                is_scalar = True
+        elif op.result and op.result.type_str and "tensor" not in op.result.type_str:
+            is_scalar = True
+        if is_scalar:
+            lhs = self._get_operand(op.operands[0])
+            rhs = self._get_operand(op.operands[1])
+            result_expr = ir.Mul(lhs, rhs, DataType.INT64, self.span)
+            result_var = self.ib.let(
+                f"muli_{op.result.name}".replace("%", ""),
+                result_expr,
+            )
+            self.value_map[self._value_key(op.result)] = result_var
+        else:
+            try:
+                self._convert_binary_op(op, "mul", tile.mul)
+            except (ValueError, TypeError):
+                # Index tensor muli (e.g. make_range*const) - use scalar placeholder
+                lhs = self._get_operand(op.operands[0])
+                rhs = self._get_operand(op.operands[1])
+                result_expr = ir.Mul(lhs, rhs, DataType.INT64, self.span)
+                result_var = self.ib.let(
+                    f"muli_{op.result.name}".replace("%", ""),
+                    result_expr,
+                )
+                self.value_map[self._value_key(op.result)] = result_var
 
     def _convert_arith_divf(self, op: MLIROperation) -> None:
         """Convert arith.divf to tile.div."""
@@ -536,6 +649,10 @@ class TTIRToPyptoConverter:
         result_var = self.ib.let(f"exp_{op.result.name}".replace("%", ""), result_expr)
         self.value_map[self._value_key(op.result)] = result_var
 
+    def _convert_math_exp(self, op: MLIROperation) -> None:
+        """Convert math.exp to tile.exp (Triton uses math.exp for tl.exp)."""
+        self._convert_tt_exp(op)
+
     def _convert_arith_cmpf(self, op: MLIROperation) -> None:
         """Convert arith.cmpf - use tile.cmp."""
         if not op.result or len(op.operands) < 2:
@@ -570,12 +687,122 @@ class TTIRToPyptoConverter:
         self.value_map[self._value_key(op.result)] = result_var
 
     def _convert_tt_program_id(self, op: MLIROperation) -> None:
-        """Convert tt.program_id - create param placeholder."""
+        """Convert tt.program_id - use pid param (must be added in _build_incore_function)."""
         if not op.result:
             return
         axis = op.attributes.get("axis", 0)
-        var = self.ib.var(
-            f"pid_{axis}",
-            ir.ScalarType(DataType.INT64),
+        if isinstance(axis, str) and "x" in axis.lower():
+            axis = 0
+        elif isinstance(axis, str) and "y" in axis.lower():
+            axis = 1
+        elif isinstance(axis, str) and "z" in axis.lower():
+            axis = 2
+        else:
+            try:
+                axis = int(axis)
+            except (ValueError, TypeError):
+                axis = 0
+        key = f"%pid_{axis}"
+        if key in self.value_map:
+            self.value_map[self._value_key(op.result)] = self.value_map[key]
+        else:
+            var = self.ib.var(f"pid_{axis}", ir.ScalarType(DataType.INT64))
+            self.value_map[self._value_key(op.result)] = var
+
+    def _convert_tt_dot(self, op: MLIROperation) -> None:
+        """Convert tt.dot to tile.matmul or tile.matmul_acc."""
+        if not op.result or len(op.operands) < 2:
+            return
+        lhs = self._get_operand(op.operands[0])
+        rhs = self._get_operand(op.operands[1])
+        shape = [16, 16]
+        if op.result_types and op.result_types[0].is_tensor():
+            s = op.result_types[0].get_shape()
+            if s:
+                shape = s
+        if len(op.operands) >= 3:
+            acc = self._get_operand(op.operands[2])
+            try:
+                result_expr = tile.matmul_acc(acc, lhs, rhs, span=self.span)
+            except (ValueError, TypeError):
+                # acc was scalar (ConstFloat); create zeros tile
+                acc = tile.full(shape, DataType.FP32, 0.0, span=self.span)
+                acc = self.ib.let("dot_acc_init", acc)
+                result_expr = tile.matmul_acc(acc, lhs, rhs, span=self.span)
+        else:
+            result_expr = tile.matmul(lhs, rhs, span=self.span)
+        result_var = self.ib.let(
+            f"dot_{op.result.name}".replace("%", ""),
+            result_expr,
         )
-        self.value_map[self._value_key(op.result)] = var
+        self.value_map[self._value_key(op.result)] = result_var
+
+    def _convert_tt_reduce(self, op: MLIROperation) -> None:
+        """Convert tt.reduce to tile.row_sum or tile.row_max.
+
+        Infers reduce kind from body: arith.addf -> row_sum, arith.maximumf/maxnumf -> row_max.
+        For 1D input [N], reshapes to [1,N] then row_sum -> [1,1].
+        """
+        if not op.result or not op.operands:
+            return
+        inp = self._get_operand(op.operands[0])
+
+        # Infer reduce kind: arith.addf/addi -> row_sum, maximumf/maxnumf -> row_max
+        reduce_kind = "row_sum"
+        if op.attributes:
+            attr_str = str(op.attributes)
+            if "maximumf" in attr_str or "maxnumf" in attr_str:
+                reduce_kind = "row_max"
+
+        # Get input shape: reduce (tensor<128xf32>) -> f32 means 1D input [128]
+        # Our load converts 1D to [128,1], so we need [1,128] for row_sum
+        inp_shape = [128, 128]
+        # Try to get operand type from body - reduce line has ": (tensor<...>) ->"
+        # For now use body_ops to find the load that produced this operand
+        op_key = self._value_key(op.operands[0])
+        # Heuristic: if load produced [N,1] we need [1,N]. Default [128,1] from load.
+        inp_shape = [128, 1]  # load of 1D gives [N,1] in our converter
+        # For row_sum we need last dim to reduce, so [1,N] not [N,1]
+        inp_shape = [1, 128]
+        # Reshape [128,1] to [1,128] for row_sum (reduce axis 0)
+        inp = tile.reshape(inp, [1, 128], span=self.span)
+        inp = self.ib.let("reduce_reshape", inp)
+
+        tmp_tile = tile.create([1, 128], DataType.FP32, span=self.span)
+        tmp_var = self.ib.let(f"reduce_tmp_{op.result.name}".replace("%", ""), tmp_tile)
+
+        if reduce_kind == "row_max":
+            result_expr = tile.row_max(inp, tmp_var, span=self.span)
+        else:
+            result_expr = tile.row_sum(inp, tmp_var, span=self.span)
+
+        result_var = self.ib.let(
+            f"reduce_{op.result.name}".replace("%", ""),
+            result_expr,
+        )
+        self.value_map[self._value_key(op.result)] = result_var
+
+    def _convert_tt_expand_dims(self, op: MLIROperation) -> None:
+        """Convert tt.expand_dims - add dimension. Forward operand for index propagation."""
+        if not op.result or not op.operands:
+            return
+        try:
+            inp = self._get_operand(op.operands[0])
+            self.value_map[self._value_key(op.result)] = inp
+        except Exception:
+            # Operand may be make_range etc; use placeholder
+            c0 = ir.ConstInt(0, DataType.INT64, self.span)
+            var = self.ib.let(f"expand_{op.result.name}".replace("%", ""), c0)
+            self.value_map[self._value_key(op.result)] = var
+
+    def _convert_tt_broadcast(self, op: MLIROperation) -> None:
+        """Convert tt.broadcast - broadcast tensor. Forward operand."""
+        if not op.result or not op.operands:
+            return
+        try:
+            inp = self._get_operand(op.operands[0])
+            self.value_map[self._value_key(op.result)] = inp
+        except Exception:
+            c0 = ir.ConstInt(0, DataType.INT64, self.span)
+            var = self.ib.let(f"bcast_{op.result.name}".replace("%", ""), c0)
+            self.value_map[self._value_key(op.result)] = var

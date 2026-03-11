@@ -143,7 +143,27 @@ class MLIRParser:
                         self.current_module.append(fake_op)
                 break
 
-        for line in lines:
+        # Merge multi-line operations (e.g. tt.reduce with region)
+        merged_lines: list[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            # Merge "tt.reduce" ops that span multiple lines until "}) :"
+            if line and "tt.reduce" in line and '"' in line and "}) :" not in line:
+                combined = line
+                i += 1
+                while i < len(lines):
+                    next_line = lines[i].strip()
+                    combined += " " + next_line
+                    i += 1
+                    if "}) :" in combined:
+                        break
+                merged_lines.append(combined)
+                continue
+            merged_lines.append(line)
+            i += 1
+
+        for line in merged_lines:
             line = line.strip()
             if not line or line.startswith("//") or line.startswith("#"):
                 continue
@@ -191,13 +211,16 @@ class MLIRParser:
 
         op_name, operands, attributes = self._parse_op_body(line)
 
-        # Get result type from op body if not from result: "tt.load %arg0 : tensor<128xf32>"
+        # Get result type from op body if not from result
         if not result_types and ":" in line and "{" not in line.split(":")[0]:
             type_part = line.split(":", 1)[1].strip()
-            if type_part and "<" in type_part:
-                # Extract type until balancing
-                end = type_part.find(">") + 1 if ">" in type_part else len(type_part)
-                type_str = type_part[:end].strip()
+            if type_part:
+                if "<" in type_part:
+                    end = type_part.find(">") + 1 if ">" in type_part else len(type_part)
+                    type_str = type_part[:end].strip()
+                else:
+                    # Scalar type: i32, f32, etc.
+                    type_str = type_part.split()[0] if type_part.split() else type_part
                 if type_str:
                     result_types = [MLIRType(type_str)]
 
@@ -233,18 +256,34 @@ class MLIRParser:
         operands: list[MLIRValue] = []
         attributes: dict[str, Any] = {}
 
-        # Handle attribute dict at end: {key = value}
-        if "{" in line:
+        # Handle attribute dict: <{key = value}> or {key = value}
+        # Avoid matching region open ({ for tt.reduce
+        if "<{" in line:
+            # Angular attribute dict: <{axis = 0 : i32}>
+            import re as _re
+            m = _re.search(r"<\{([^}]+)\}>", line)
+            if m:
+                attributes = self._parse_attributes(m.group(1))
+                line = _re.sub(r"<\{[^}]+\}\>", "", line).strip()
+        elif "{" in line:
             attr_start = line.rfind("{")
-            attr_str = line[attr_start:].strip("{}")
-            attributes = self._parse_attributes(attr_str)
-            line = line[:attr_start].strip()
+            # Skip if this is region open "({"
+            if attr_start > 0 and line[attr_start - 1 : attr_start + 1] != "({":
+                attr_str = line[attr_start:].strip("{}")
+                if "=" in attr_str:  # Only parse if looks like key=value
+                    attributes = self._parse_attributes(attr_str)
+                    line = line[:attr_start].strip()
 
         if "(" in line and line.find("(") < (line.find(":") if ":" in line else len(line)):
             # op(args) format
             paren = line.index("(")
             op_name = line[:paren].strip()
-            body = line[paren + 1 : line.rfind(")")]
+            # For ops with regions like "tt.reduce"(%x) ({...}), use first ) to close operands
+            first_close = line.find(")", paren)
+            if first_close > paren:
+                body = line[paren + 1 : first_close]
+            else:
+                body = line[paren + 1 : line.rfind(")")]
             operands = self._parse_operand_list(body)
         else:
             # op %operand : type or op value : type format

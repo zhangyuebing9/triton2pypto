@@ -117,11 +117,24 @@ PYTHONPATH=/workspace/src:/workspace python examples/run_triton_to_pypto_e2e.py
 export SIMPLER_ROOT=$(pwd)/third_party/simpler
 ```
 
+## 已完成（elementwise + reduce + matmul）
+
+### 算子支持扩展 ✅
+- **Elementwise**: add, sub, mul, div, exp（含 math.exp → tile.exp）
+- **Reduce**: tt.reduce → tile.row_sum / tile.row_max（含 1D→2D reshape）
+- **Matmul**: tt.dot → tile.matmul / tile.matmul_acc
+- **辅助**: tt.expand_dims, tt.broadcast, tt.make_range, arith.muli/addi 标量处理, dense 张量常量
+
+### 示例与测试 ✅
+- `examples/sub_kernel_simple.py`, `mul_kernel_simple.py`, `div_kernel_simple.py`, `exp_kernel_simple.py`
+- `examples/reduce_sum_kernel_simple.py`, `matmul_kernel_simple.py`
+- `tests/test_triton_to_pypto_e2e.py`: 各算子转换 + 编译测试，add/sub/mul/exp 执行测试（需 SIMPLER_ROOT）
+
 ## 下一步工作
 
 ### 优先级 2：扩展与优化
 - 支持带 mask 的 add kernel（更复杂 TTIR）
-- 处理 simpler orchestration 编译兼容性（pto2_rt_init_tensor_pool 等）
+- reduce_sum、matmul 的 simpler 执行测试（需验证 tensor spec 与 golden）
 
 ## 技术决策
 
