@@ -348,6 +348,55 @@ class TestTritonToPyPTOExecution:
             golden, tensor_specs,
         )
 
+    def test_triton_reduce_sum_to_pypto_run_cpu(self, workspace_path):
+        """reduce_sum: PyPTO 执行结果与参考一致。"""
+        torch = pytest.importorskip("torch")
+        from pypto.runtime import TensorSpec
+        from examples.reduce_sum_kernel_simple import reduce_sum_kernel_simple
+
+        def golden(tensors, params):
+            # row-wise sum: out = sum(x) for single row
+            tensors["out"][:] = tensors["x"].sum().reshape_as(tensors["out"])
+
+        x_2d = torch.randn(128, 1, dtype=torch.float32)
+        tensor_specs = [
+            TensorSpec("x", [128, 1], torch.float32, init_value=x_2d),
+            TensorSpec("out", [1, 1], torch.float32, is_output=True),
+        ]
+        self._run_and_compare(
+            workspace_path,
+            reduce_sum_kernel_simple,
+            {"x": "*fp32", "out": "*fp32"},
+            {"BLOCK": 128},
+            golden,
+            tensor_specs,
+        )
+
+    def test_triton_matmul_to_pypto_run_cpu(self, workspace_path):
+        """matmul: PyPTO 执行结果与参考一致。"""
+        torch = pytest.importorskip("torch")
+        from pypto.runtime import TensorSpec
+        from examples.matmul_kernel_simple import matmul_kernel_simple
+
+        def golden(tensors, params):
+            tensors["C"][:] = tensors["A"] @ tensors["B"]
+
+        A = torch.randn(16, 16, dtype=torch.float32) * 0.1
+        B = torch.randn(16, 16, dtype=torch.float32) * 0.1
+        tensor_specs = [
+            TensorSpec("A", [16, 16], torch.float32, init_value=A),
+            TensorSpec("B", [16, 16], torch.float32, init_value=B),
+            TensorSpec("C", [16, 16], torch.float32, is_output=True),
+        ]
+        self._run_and_compare(
+            workspace_path,
+            matmul_kernel_simple,
+            {"A": "*fp32", "B": "*fp32", "C": "*fp32"},
+            {"BLOCK": 16},
+            golden,
+            tensor_specs,
+        )
+
     @pytest.mark.skip(reason="exp 2-param orchestration 与 simpler 集成待调查")
     def test_triton_exp_to_pypto_run_cpu(self, workspace_path):
         """exp: PyPTO 执行结果与参考一致。"""

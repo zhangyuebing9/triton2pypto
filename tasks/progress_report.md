@@ -131,8 +131,8 @@ export SIMPLER_ROOT=$(pwd)/third_party/simpler
 - `tests/test_triton_to_pypto_e2e.py`: 各算子转换 + 编译测试
 
 ### CPU 仿真执行验证 ✅
-- **PyPTO-simpler 兼容性**：third_party/pypto 中注释 `pto2_rt_init_tensor_pool` 以兼容 simpler a2a3sim
-- **执行测试通过**：add/sub/mul/div 与参考（Python 运算，等价于 Triton CPU）一致
+- **PyPTO-simpler 兼容性**：`scripts/apply_pypto_patches.sh` 应用 `pto2_rt_init_tensor_pool` 移除补丁
+- **执行测试通过**：add/sub/mul/div、reduce_sum、matmul 与参考（Python 运算）一致
 - **exp 执行测试**：暂跳过（2-param orchestration 待调查）
 - **run_triton_to_pypto_e2e.py**：add 端到端验证，含 Triton TRITON_INTERPRET 对比
 
@@ -141,7 +141,6 @@ export SIMPLER_ROOT=$(pwd)/third_party/simpler
 ### 优先级 2：扩展与优化
 - 支持带 mask 的 add kernel（更复杂 TTIR）
 - exp 执行测试：2-param orchestration 与 simpler 集成
-- reduce_sum、matmul 的 simpler 执行测试（需验证 tensor spec 与 golden）
 
 ## 技术决策
 
