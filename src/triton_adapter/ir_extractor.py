@@ -28,9 +28,12 @@ def _infer_signature_and_constexprs(kernel: Any, args: tuple, kwargs: dict) -> t
     arg_names = getattr(kernel, "arg_names", []) or []
 
     for i, name in enumerate(arg_names):
-        if i >= len(args):
-            break
-        val = args[i]
+        if i < len(args):
+            val = args[i]
+        else:
+            val = kwargs.get(name)
+            if val is None:
+                continue
         if type(val).__name__ == "constexpr":
             constexprs[name] = val.value
             sig[name] = "i32"  # constexpr often used as size
@@ -52,8 +55,15 @@ def _infer_signature_and_constexprs(kernel: Any, args: tuple, kwargs: dict) -> t
         elif isinstance(val, int):
             constexprs[name] = val
             sig[name] = "i32"
+        elif isinstance(val, (list, tuple)):
+            continue  # e.g. grid, skip
         else:
             sig[name] = "*fp32"  # fallback for pointers
+
+    # Merge constexprs from kwargs (e.g. n=128) - exclude grid
+    for k, v in kwargs.items():
+        if k != "grid" and k in arg_names and k not in constexprs and isinstance(v, int):
+            constexprs[k] = v
     return sig, constexprs
 
 
