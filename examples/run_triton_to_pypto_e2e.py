@@ -8,6 +8,8 @@
 4. Triton TRITON_INTERPRET=1 CPU 执行
 5. 对比两者结果一致
 
+所有 Triton kernel 均从源码提取 TTIR，包含 pid 和 mask 的标准实现。
+
 需要: pypto, torch, triton, SIMPLER_ROOT=third_party/simpler
 """
 
@@ -16,7 +18,7 @@ import sys
 
 workspace = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(workspace, "src"))
-sys.path.insert(0, workspace)  # for examples.add_kernel_simple
+sys.path.insert(0, workspace)  # for examples.add_kernel
 simpler_path = os.path.join(workspace, "third_party", "simpler")
 if os.path.exists(simpler_path):
     os.environ["SIMPLER_ROOT"] = simpler_path
@@ -28,12 +30,11 @@ if os.path.exists(simpler_path):
 
 def main():
     print("=" * 70)
-    print("Triton -> PyPTO 端到端验证: add kernel (CPU 仿真)")
+    print("Triton -> PyPTO 端到端验证: add kernel (带 mask, CPU 仿真)")
     print("=" * 70)
 
     import torch
 
-    # 使用 128 元素以匹配 add_kernel_simple 的 BLOCK
     n = 128
     a_tensor = torch.randn(n, dtype=torch.float32)
     b_tensor = torch.randn(n, dtype=torch.float32)
@@ -45,15 +46,15 @@ def main():
     print(f"    参考[:4] = {reference[:4].tolist()}")
 
     # 提取 TTIR（compile-only，无需 GPU）
-    print("\n[2] 从 Triton 源码提取 TTIR")
+    print("\n[2] 从 Triton 源码提取 TTIR（add_kernel 含 pid/mask）")
     import triton
     from triton.backends.compiler import GPUTarget
     from triton.compiler import ASTSource
 
-    from examples.add_kernel_simple import add_kernel_simple
+    from examples.add_kernel import add_kernel
 
-    sig = {"a": "*fp32", "b": "*fp32", "out": "*fp32"}
-    src = ASTSource(fn=add_kernel_simple, signature=sig, constexprs={})
+    sig = {"x": "*fp32", "y": "*fp32", "out": "*fp32"}
+    src = ASTSource(fn=add_kernel, signature=sig, constexprs={"n": 128})
     k = triton.compile(src, target=GPUTarget("cuda", 80, 32))
     ttir = k.asm["ttir"]
     print("    TTIR 提取成功 (长度 %d 字符)" % len(ttir))
@@ -62,14 +63,13 @@ def main():
     print("\n[3] 转换为 PyPTO IR")
     from triton_adapter import convert_ttir_to_pypto
 
-    program = convert_ttir_to_pypto(ttir, program_name="add_kernel_simple")
+    program = convert_ttir_to_pypto(ttir, program_name="add_kernel")
     funcs = list(program.functions.values())
     print(f"    Program: {program.name}, Functions: {[f.name for f in funcs]}")
 
     # PyPTO + simpler 执行
     print("\n[4] PyPTO + simpler a2a3sim 执行")
 
-    # Reshape to 128x1 for tile ops (我们的 converter 转成 2D)
     a_2d = a_tensor.reshape(128, 1)
     b_2d = b_tensor.reshape(128, 1)
     out_2d = torch.zeros(128, 1, dtype=torch.float32)
@@ -79,11 +79,11 @@ def main():
     from pypto.runtime import RunConfig, TensorSpec, run
 
     def golden(tensors: dict, params: dict | None = None) -> None:
-        tensors["out"][:] = tensors["a"] + tensors["b"]
+        tensors["out"][:] = tensors["x"] + tensors["y"]
 
     tensor_specs = [
-        TensorSpec("a", [128, 1], torch.float32, init_value=a_2d),
-        TensorSpec("b", [128, 1], torch.float32, init_value=b_2d),
+        TensorSpec("x", [128, 1], torch.float32, init_value=a_2d),
+        TensorSpec("y", [128, 1], torch.float32, init_value=b_2d),
         TensorSpec("out", [128, 1], torch.float32, is_output=True),
     ]
 
@@ -116,12 +116,12 @@ os.environ["TRITON_INTERPRET"] = "1"
 import sys
 sys.path.insert(0, {repr(workspace)})
 import torch
-from examples.add_kernel_simple import add_kernel_simple
+from examples.add_kernel import add_kernel
 
 data = torch.load({repr(data_path)})
 a, b = data["a"], data["b"]
 out = torch.empty_like(a)
-add_kernel_simple[(1,)](a, b, out)
+add_kernel[(1,)](a, b, out, n=128)
 torch.save({{"out": out}}, {repr(data_path + ".out")})
 """
                 r = subprocess.run(
@@ -144,14 +144,13 @@ torch.save({{"out": out}}, {repr(data_path + ".out")})
             finally:
                 os.unlink(data_path)
 
-            # PyPTO 通过 golden(a+b) 校验，等价于与 Triton 一致
             print("\n[6] 综合验证")
             print("    - PyPTO 输出 = golden(a,b) = a + b (result.passed)")
             if triton_vs_ref < 1e-4:
                 print("    - Triton 输出 = a + b (triton_vs_ref < 1e-4)")
                 print("    -> 转换后 PyPTO 执行结果与 Triton 一致")
                 print("\n" + "=" * 70)
-                print("✓ 验证通过: add 类型 elementwise 算子 Triton->PyPTO 转换与 CPU 仿真执行正确")
+                print("✓ 验证通过: 带 mask 的 add kernel Triton->PyPTO 转换与 CPU 仿真执行正确")
                 print("=" * 70)
             else:
                 print("    - Triton 输出校验:", "通过" if triton_vs_ref < 1e-4 else f"diff={triton_vs_ref}")

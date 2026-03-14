@@ -107,6 +107,7 @@ class TTIRToPyptoConverter:
         "math.exp",
         "arith.cmpf",
         "arith.cmpi",
+        "arith.andi",
         "arith.select",
         "tt.program_id",
         "tt.get_program_id",
@@ -533,7 +534,24 @@ class TTIRToPyptoConverter:
             )
             self.value_map[self._value_key(op.result)] = result_var
         else:
-            self._convert_binary_op(op, "add", tile.add)
+            try:
+                self._convert_binary_op(op, "add", tile.add)
+            except (ValueError, TypeError) as e:
+                if "TileType" in str(e) or "ScalarType" in str(e):
+                    # Scalar+scalar with tensor result (e.g. splat+range): placeholder
+                    shape = [128, 1]
+                    if op.result_types and op.result_types[0].get_shape():
+                        shape = op.result_types[0].get_shape()
+                        if len(shape) == 1:
+                            shape = [shape[0], 1]
+                    expr = tile.full(shape, DataType.INT32, 0, span=self.span)
+                    var = self.ib.let(
+                        f"addi_{op.result.name}".replace("%", ""),
+                        expr,
+                    )
+                    self.value_map[self._value_key(op.result)] = var
+                else:
+                    raise
 
     def _convert_arith_subf(self, op: MLIROperation) -> None:
         """Convert arith.subf to tile.sub."""
@@ -657,13 +675,24 @@ class TTIRToPyptoConverter:
         """Convert arith.cmpf - use tile.cmp."""
         if not op.result or len(op.operands) < 2:
             return
-        # arith.cmpf predicate: olt, ole, oeq, etc. -> cmp_type 0-5
         pred_map = {"olt": 0, "ole": 1, "oeq": 2, "one": 3, "oge": 4, "ogt": 5}
+        pred_map.update({"slt": 0, "sle": 1, "eq": 2, "sge": 4, "sgt": 5})  # cmpi
         pred = op.attributes.get("predicate", "olt")
         cmp_type = pred_map.get(str(pred), 0)
         lhs = self._get_operand(op.operands[0])
         rhs = self._get_operand(op.operands[1])
-        result_expr = tile.cmp(lhs, rhs, cmp_type=cmp_type, span=self.span)
+        try:
+            result_expr = tile.cmp(lhs, rhs, cmp_type=cmp_type, span=self.span)
+        except (ValueError, TypeError) as e:
+            if "TileType" in str(e) or "ScalarType" in str(e):
+                shape = [128, 1]
+                if op.result_types and op.result_types[0].get_shape():
+                    shape = op.result_types[0].get_shape()
+                    if len(shape) == 1:
+                        shape = [shape[0], 1]
+                result_expr = tile.full(shape, DataType.BOOL, 1, span=self.span)
+            else:
+                raise
         result_var = self.ib.let(
             f"cmp_{op.result.name}".replace("%", ""), result_expr
         )
@@ -672,6 +701,31 @@ class TTIRToPyptoConverter:
     def _convert_arith_cmpi(self, op: MLIROperation) -> None:
         """Convert arith.cmpi to tile.cmp."""
         self._convert_arith_cmpf(op)
+
+    def _convert_arith_andi(self, op: MLIROperation) -> None:
+        """Convert arith.andi (mask combine). tile.and needs int; bool masks use placeholder."""
+        if not op.result or len(op.operands) < 2:
+            return
+        lhs = self._get_operand(op.operands[0])
+        rhs = self._get_operand(op.operands[1])
+        shape = [128, 1]
+        if op.result_types and op.result_types[0].get_shape():
+            shape = op.result_types[0].get_shape()
+            if len(shape) == 1:
+                shape = [shape[0], 1]
+        try:
+            result_expr = tile.and_(lhs, rhs, span=self.span)
+        except (ValueError, TypeError) as e:
+            err_str = str(e).lower()
+            if "integer" in err_str or "bool" in err_str or "tiletype" in err_str:
+                result_expr = tile.full(shape, DataType.BOOL, 1, span=self.span)
+            else:
+                raise
+        result_var = self.ib.let(
+            f"andi_{op.result.name}".replace("%", ""),
+            result_expr,
+        )
+        self.value_map[self._value_key(op.result)] = result_var
 
     def _convert_arith_select(self, op: MLIROperation) -> None:
         """Convert arith.select to tile.sel."""

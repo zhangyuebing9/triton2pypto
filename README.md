@@ -14,10 +14,28 @@ triton2pypto/
 │   ├── triton_adapter/  # Triton IR 提取/转换
 │   ├── pypto_backend/   # PyPTO 后端接入
 │   └── passes/          # IR 转换 pass
-├── examples/            # 示例脚本
+├── examples/            # 示例（从 Triton 源码出发）
 ├── tests/
 ├── scripts/
 └── tasks/
+```
+
+## 示例说明
+
+所有示例均**从 Triton 源码提取 TTIR**，遵循标准实现模式（含 `program_id` 和 `mask`）：
+
+- `add_kernel.py`, `sub_kernel.py`, `mul_kernel.py`, `div_kernel.py`, `exp_kernel.py` - elementwise 算子
+- `reduce_sum_kernel.py` - 行内 reduce
+- `matmul_kernel.py` - 分块矩阵乘
+
+每个 Triton kernel 均包含：
+
+```python
+pid = tl.program_id(0)
+blk = pid * BLOCK
+offs = blk + tl.arange(0, BLOCK)
+mask = offs < n
+# 使用 mask 进行 load/store
 ```
 
 ## 构建环境
@@ -40,75 +58,49 @@ git submodule update --init --recursive
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate   # Linux/macOS
-# Windows: .venv\Scripts\activate
 
-# 安装 PyPTO（使用 submodule 中的源码）
 pip install -e third_party/pypto
-
-# 安装 triton2pypto（纯 Python，通过 PYTHONPATH 或 pip）
-# 方式 A：开发模式（若项目有 CMake 则需完整构建）
-pip install -e .
-
-# 方式 B：仅将 src 加入路径运行示例
 export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 ```
 
 ### 3. 设置 CPU 仿真环境变量
 
-PyPTO 通过 simpler 的 a2a3sim 平台在 CPU 上仿真执行。需设置：
-
 ```bash
 export SIMPLER_ROOT=$(pwd)/third_party/simpler
 ```
 
-## 运行 Elementwise 示例
+## 运行端到端示例
 
-Elementwise 端到端验证：TTIR → PyPTO IR → CPU 仿真 → 精度对比。
+所有示例从 Triton 源码提取 TTIR，经 PyPTO 转换后在 simpler CPU 仿真中执行并与参考结果对比。
 
 ```bash
-# 确保在项目根目录，已激活 venv，并设置 SIMPLER_ROOT
 source .venv/bin/activate
 export SIMPLER_ROOT=$(pwd)/third_party/simpler
 export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 
-python examples/run_elementwise_e2e.py
-```
+# add kernel 端到端（带 mask）
+python examples/run_triton_to_pypto_e2e.py
 
-该脚本将：
-
-1. 使用 elementwise add 的 TTIR 样本
-2. 转换为 PyPTO IR 并展示
-3. 在 a2a3sim（CPU 仿真）上执行等价 PyPTO 程序
-4. 验证 PyPTO 输出与参考 (a+b) 在数值上一致
-
-成功输出示例：
-
-```
-======================================================================
-✓ 验证通过: PyPTO simpler CPU 输出与参考 (a+b) 一致
-======================================================================
+# exp kernel 端到端
+python examples/run_exp_e2e.py
 ```
 
 ## 运行测试
 
 ```bash
-# 设置环境变量
 export SIMPLER_ROOT=$(pwd)/third_party/simpler
 export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 
-# 运行所有测试
 pytest tests/ -v
 
-# 仅运行 Phase 1 功能测试
-pytest tests/test_phase1_functional.py -v
+# 仅转换与编译测试（无需 SIMPLER_ROOT）
+pytest tests/test_triton_to_pypto_e2e.py::TestTritonToPyPTOConversion -v
 
-# 运行 TTIR 转换器单元测试
-pytest tests/test_ttir_converter.py -v
+# 完整执行测试（需 SIMPLER_ROOT）
+pytest tests/test_triton_to_pypto_e2e.py::TestTritonToPyPTOExecution -v
 ```
 
-带 `SIMPLER_ROOT` 时，`test_pypto_vector_add_run_cpu` 会执行完整的 CPU 仿真；未设置时该测试会被跳过。
-
-## 快速开始（精简）
+## 快速开始
 
 ```bash
 git submodule update --init --recursive
@@ -116,7 +108,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e third_party/pypto
 export SIMPLER_ROOT=$(pwd)/third_party/simpler
 export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
-python examples/run_elementwise_e2e.py
+python examples/run_triton_to_pypto_e2e.py
 ```
 
 ## 开发

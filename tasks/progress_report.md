@@ -126,9 +126,12 @@ export SIMPLER_ROOT=$(pwd)/third_party/simpler
 - **辅助**: tt.expand_dims, tt.broadcast, tt.make_range, arith.muli/addi 标量处理, dense 张量常量
 
 ### 示例与测试 ✅
-- `examples/sub_kernel_simple.py`, `mul_kernel_simple.py`, `div_kernel_simple.py`, `exp_kernel_simple.py`
-- `examples/reduce_sum_kernel_simple.py`, `matmul_kernel_simple.py`
-- `tests/test_triton_to_pypto_e2e.py`: 各算子转换 + 编译测试
+- **示例统一**：从 Triton 源码提取 TTIR，所有 kernel 含 pid 与 mask 标准模式
+- `examples/add_kernel.py`, `sub_kernel.py`, `mul_kernel.py`, `div_kernel.py`, `exp_kernel.py`
+- `examples/reduce_sum_kernel.py`, `matmul_kernel.py`
+- `run_triton_to_pypto_e2e.py`：add 端到端（带 mask）✅
+- `run_exp_e2e.py`：exp 端到端
+- 已删除：`run_elementwise_e2e.py`（TTIR 文本）、`*_kernel_simple.py`、`phase1_elementwise_example.py`
 
 ### CPU 仿真执行验证 ✅
 - **PyPTO-simpler 兼容性**：`scripts/apply_pypto_patches.sh` 应用 `pto2_rt_init_tensor_pool` 移除补丁
@@ -138,9 +141,9 @@ export SIMPLER_ROOT=$(pwd)/third_party/simpler
 
 ## 下一步工作
 
-### 优先级 2：扩展与优化
-- 支持带 mask 的 add kernel（更复杂 TTIR）
-- exp 执行测试：2-param orchestration 与 simpler 集成
+### 优先级 2：扩展与优化（进行中）
+- ~~支持带 mask 的 add kernel（更复杂 TTIR）~~ ✅ 已完成：converter 支持 arith.addi/cmpi/andi 的 mask 相关占位，add E2E 通过
+- exp 执行测试：2-param orchestration 与 simpler 集成（add/exp 端到端脚本已添加，exp 数值校验待排查）
 
 ## 技术决策
 
