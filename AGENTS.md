@@ -285,7 +285,7 @@ pypto is a C++ extension built with scikit-build-core + nanobind. Building takes
    ```bash
    source .venv/bin/activate
    export SIMPLER_ROOT=$(pwd)/third_party/simpler
-   PYTHONPATH=/workspace/src:/workspace python examples/run_triton_to_pypto_e2e.py
+   PYTHONPATH=/workspace/src:/workspace python examples/run_e2e.py --kernel add
    ```
 
 4. **运行带 simpler 的测试**：

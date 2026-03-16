@@ -9,8 +9,6 @@
 | 文件 | 说明 |
 |------|------|
 | `run_e2e.py` | **统一入口**，支持所有 kernel，通过 `--kernel` 选择 |
-| `run_triton_to_pypto_e2e.py` | add kernel 便捷脚本（含 Triton TRITON_INTERPRET 对比） |
-| `run_exp_e2e.py` | exp kernel 便捷脚本 |
 | `add_kernel.py`, `sub_kernel.py`, ... | Triton kernel 定义 |
 
 ## 支持的 Kernel
@@ -51,16 +49,6 @@ python examples/run_e2e.py --kernel matmul
 python examples/run_e2e.py --kernel add --triton-compare
 ```
 
-### 便捷脚本
-
-```bash
-# add kernel（等价于 run_e2e.py -k add --triton-compare）
-python examples/run_triton_to_pypto_e2e.py
-
-# exp kernel（等价于 run_e2e.py -k exp）
-python examples/run_exp_e2e.py
-```
-
 ## pytest 测试
 
 `tests/test_triton_to_pypto_e2e.py` 包含：
@@ -81,8 +69,8 @@ pytest tests/test_triton_to_pypto_e2e.py::TestTritonToPyPTOExecution -v
 
 | 测试层级 | examples/ | tests/ |
 |----------|-----------|--------|
-| add | run_triton_to_pypto_e2e.py, run_e2e.py -k add | TestTritonToPyPTOConversion, TestTritonToPyPTOExecution |
-| exp | run_exp_e2e.py, run_e2e.py -k exp | TestTritonToPyPTOConversion（Execution 中 exp 被 skip） |
+| add | run_e2e.py -k add | TestTritonToPyPTOConversion, TestTritonToPyPTOExecution |
+| exp | run_e2e.py -k exp | TestTritonToPyPTOConversion（Execution 中 exp 被 skip） |
 | sub/mul/div/reduce_sum/matmul | run_e2e.py -k \<name\> | TestTritonToPyPTOConversion, TestTritonToPyPTOExecution |
 
 所有 kernel 均有 pytest 覆盖；examples 下统一通过 `run_e2e.py` 运行。

@@ -111,7 +111,7 @@ export SIMPLER_ROOT=$(pwd)/third_party/simpler
 ### 使用方式
 ```bash
 # 转换 + 编译（无需 GPU）
-PYTHONPATH=/workspace/src:/workspace python examples/run_triton_to_pypto_e2e.py
+PYTHONPATH=/workspace/src:/workspace python examples/run_e2e.py --kernel add
 
 # 运行 simpler CPU 仿真需 SIMPLER_ROOT 且 simpler 环境正确
 export SIMPLER_ROOT=$(pwd)/third_party/simpler
@@ -129,15 +129,14 @@ export SIMPLER_ROOT=$(pwd)/third_party/simpler
 - **示例统一**：从 Triton 源码提取 TTIR，所有 kernel 含 pid 与 mask 标准模式
 - `examples/add_kernel.py`, `sub_kernel.py`, `mul_kernel.py`, `div_kernel.py`, `exp_kernel.py`
 - `examples/reduce_sum_kernel.py`, `matmul_kernel.py`
-- `run_triton_to_pypto_e2e.py`：add 端到端（带 mask）✅
-- `run_exp_e2e.py`：exp 端到端
+- `run_e2e.py`：统一入口，支持 add/sub/mul/div/exp/reduce_sum/matmul
 - 已删除：`run_elementwise_e2e.py`（TTIR 文本）、`*_kernel_simple.py`、`phase1_elementwise_example.py`
 
 ### CPU 仿真执行验证 ✅
 - **PyPTO-simpler 兼容性**：`scripts/apply_pypto_patches.sh` 应用 `pto2_rt_init_tensor_pool` 移除补丁
 - **执行测试通过**：add/sub/mul/div、reduce_sum、matmul 与参考（Python 运算）一致
 - **exp 执行测试**：暂跳过（2-param orchestration 待调查）
-- **run_triton_to_pypto_e2e.py**：add 端到端验证，含 Triton TRITON_INTERPRET 对比
+- **run_e2e.py --kernel add --triton-compare**：add 端到端验证，含 Triton TRITON_INTERPRET 对比
 
 ## 下一步工作
 

@@ -84,10 +84,6 @@ export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 python examples/run_e2e.py --kernel add
 python examples/run_e2e.py --kernel exp
 python examples/run_e2e.py --list   # 列出所有 kernel
-
-# 便捷脚本（兼容旧用法）
-python examples/run_triton_to_pypto_e2e.py   # add + Triton 对比
-python examples/run_exp_e2e.py               # exp
 ```
 
 ## 运行测试
@@ -113,7 +109,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e third_party/pypto
 export SIMPLER_ROOT=$(pwd)/third_party/simpler
 export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
-python examples/run_triton_to_pypto_e2e.py
+python examples/run_e2e.py --kernel add
 ```
 
 ## 开发
