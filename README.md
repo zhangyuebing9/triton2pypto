@@ -73,16 +73,17 @@ export SIMPLER_ROOT=$(pwd)/third_party/simpler
 
 所有示例从 Triton 源码提取 TTIR，经 PyPTO 转换后在 simpler CPU 仿真中执行并与参考结果对比。
 
+支持 kernel：add, sub, mul, div, exp, reduce_sum, matmul。详见 [examples/E2E_README.md](examples/E2E_README.md)。
+
 ```bash
 source .venv/bin/activate
 export SIMPLER_ROOT=$(pwd)/third_party/simpler
 export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 
-# add kernel 端到端（带 mask）
-python examples/run_triton_to_pypto_e2e.py
-
-# exp kernel 端到端
-python examples/run_exp_e2e.py
+# 统一入口：运行任意 kernel
+python examples/run_e2e.py --kernel add
+python examples/run_e2e.py --kernel exp
+python examples/run_e2e.py --list   # 列出所有 kernel
 ```
 
 ## 运行测试
@@ -108,7 +109,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e third_party/pypto
 export SIMPLER_ROOT=$(pwd)/third_party/simpler
 export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
-python examples/run_triton_to_pypto_e2e.py
+python examples/run_e2e.py --kernel add
 ```
 
 ## 开发

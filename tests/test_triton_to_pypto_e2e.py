@@ -232,7 +232,7 @@ class TestTritonToPyPTOExecution:
     """完整执行测试：PyPTO 仿真结果与参考一致。
 
     使用 Python 数学运算作为 golden（与 Triton TRITON_INTERPRET 结果等价）。
-    run_triton_to_pypto_e2e.py 已验证 Triton 输出与 Python 一致。
+    run_e2e.py --kernel add 已验证 Triton 输出与 Python 一致。
     """
 
     def _run_and_compare(self, workspace_path, kernel_fn, sig, constexprs, golden_fn, tensor_specs):
