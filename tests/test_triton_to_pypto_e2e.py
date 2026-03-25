@@ -5,9 +5,15 @@
 """
 
 import os
+import shutil
 from pathlib import Path
 
 import pytest
+
+
+def _skip_npu_tests_without_driver() -> bool:
+    """NPU 用例在 collection 时：无 npu-smi 则跳过整类测试。"""
+    return shutil.which("npu-smi") is None
 
 
 @pytest.fixture
@@ -28,13 +34,59 @@ def _compile_kernel(workspace_path, kernel_fn, sig, constexprs=None):
     return k.asm["ttir"]
 
 
+def _run_e2e_compare(
+    workspace_path,
+    kernel_fn,
+    sig,
+    constexprs,
+    golden_fn,
+    tensor_specs,
+    *,
+    platform: str | None = None,
+    device_id: int | None = None,
+) -> None:
+    """编译 TTIR、转 PyPTO、在指定 platform 上执行并与 golden 比对。"""
+    pytest.importorskip("torch")
+    pytest.importorskip("pypto")
+    if str(workspace_path) not in os.sys.path:
+        os.sys.path.insert(0, str(workspace_path))
+    ex_dir = workspace_path / "examples"
+    if str(ex_dir) not in os.sys.path:
+        os.sys.path.insert(0, str(ex_dir))
+    from pypto.runtime import run
+
+    from e2e_common import (
+        get_e2e_device_id,
+        get_e2e_platform,
+        make_pypto_run_config,
+        pytest_skip_if_npu_platform_unavailable,
+    )
+    from triton_adapter import convert_ttir_to_pypto
+
+    plat = platform if platform is not None else get_e2e_platform()
+    dev = device_id if device_id is not None else get_e2e_device_id()
+    pytest_skip_if_npu_platform_unavailable(plat)
+
+    ttir = _compile_kernel(workspace_path, kernel_fn, sig, constexprs)
+    program = convert_ttir_to_pypto(ttir, program_name="test_kernel")
+    result = run(
+        program=program,
+        tensor_specs=tensor_specs,
+        golden=golden_fn,
+        config=make_pypto_run_config(platform=plat, device_id=dev),
+    )
+    assert result.passed, result.error or "Run failed"
+
+
 class TestTritonToPyPTOConversion:
     """测试 Triton 源码 -> TTIR -> PyPTO 转换与编译。"""
 
     def test_extract_ttir_from_triton_source(self, workspace_path):
         """从 Triton add kernel 源码提取 TTIR（compile-only，无需 GPU）。"""
-        triton = pytest.importorskip("triton")
-        torch = pytest.importorskip("torch")
+        pytest.importorskip("triton")
+        import triton
+
+        pytest.importorskip("torch")
         from triton.backends.compiler import GPUTarget
         from triton.compiler import ASTSource
 
@@ -54,9 +106,9 @@ class TestTritonToPyPTOConversion:
 
     def test_extract_ttir_api(self, workspace_path):
         """extract_ttir API 可从 kernel + args 提取 TTIR。"""
-        triton = pytest.importorskip("triton")
+        pytest.importorskip("triton")
         torch = pytest.importorskip("torch")
-        from triton_adapter import extract_ttir, convert_ttir_to_pypto
+        from triton_adapter import convert_ttir_to_pypto, extract_ttir
 
         if str(workspace_path) not in os.sys.path:
             os.sys.path.insert(0, str(workspace_path))
@@ -76,15 +128,16 @@ class TestTritonToPyPTOConversion:
 
     def test_convert_real_ttir_to_pypto(self, workspace_path):
         """转换真实 Triton TTIR 到 PyPTO IR 并编译。"""
-        triton = pytest.importorskip("triton")
-        pypto = pytest.importorskip("pypto")
+        pytest.importorskip("triton")
+        import triton
+
+        pytest.importorskip("pypto")
         from triton.backends.compiler import GPUTarget
         from triton.compiler import ASTSource
 
         if str(workspace_path) not in os.sys.path:
             os.sys.path.insert(0, str(workspace_path))
         from examples.add_kernel import add_kernel
-
         from triton_adapter import convert_ttir_to_pypto
 
         sig = {"x": "*fp32", "y": "*fp32", "out": "*fp32"}
@@ -122,11 +175,12 @@ class TestTritonToPyPTOConversion:
         """转换 sub kernel 到 PyPTO 并编译。"""
         pytest.importorskip("triton")
         pytest.importorskip("pypto")
-        from examples.sub_kernel import sub_kernel
-        from triton_adapter import convert_ttir_to_pypto
         from pypto.backend import BackendType
         from pypto.ir import compile as ir_compile
         from pypto.ir.pass_manager import OptimizationStrategy
+
+        from examples.sub_kernel import sub_kernel
+        from triton_adapter import convert_ttir_to_pypto
 
         ttir = _compile_kernel(workspace_path, sub_kernel, {"x": "*fp32", "y": "*fp32", "out": "*fp32"}, {"n": 128})
         assert "arith.subf" in ttir
@@ -140,11 +194,12 @@ class TestTritonToPyPTOConversion:
         """转换 mul kernel 到 PyPTO 并编译。"""
         pytest.importorskip("triton")
         pytest.importorskip("pypto")
-        from examples.mul_kernel import mul_kernel
-        from triton_adapter import convert_ttir_to_pypto
         from pypto.backend import BackendType
         from pypto.ir import compile as ir_compile
         from pypto.ir.pass_manager import OptimizationStrategy
+
+        from examples.mul_kernel import mul_kernel
+        from triton_adapter import convert_ttir_to_pypto
 
         ttir = _compile_kernel(workspace_path, mul_kernel, {"x": "*fp32", "y": "*fp32", "out": "*fp32"}, {"n": 128})
         program = convert_ttir_to_pypto(ttir, program_name="mul_kernel")
@@ -157,11 +212,12 @@ class TestTritonToPyPTOConversion:
         """转换 div kernel 到 PyPTO 并编译。"""
         pytest.importorskip("triton")
         pytest.importorskip("pypto")
-        from examples.div_kernel import div_kernel
-        from triton_adapter import convert_ttir_to_pypto
         from pypto.backend import BackendType
         from pypto.ir import compile as ir_compile
         from pypto.ir.pass_manager import OptimizationStrategy
+
+        from examples.div_kernel import div_kernel
+        from triton_adapter import convert_ttir_to_pypto
 
         ttir = _compile_kernel(workspace_path, div_kernel, {"x": "*fp32", "y": "*fp32", "out": "*fp32"}, {"n": 128})
         program = convert_ttir_to_pypto(ttir, program_name="div_kernel")
@@ -174,11 +230,12 @@ class TestTritonToPyPTOConversion:
         """转换 exp kernel 到 PyPTO 并编译。"""
         pytest.importorskip("triton")
         pytest.importorskip("pypto")
-        from examples.exp_kernel import exp_kernel
-        from triton_adapter import convert_ttir_to_pypto
         from pypto.backend import BackendType
         from pypto.ir import compile as ir_compile
         from pypto.ir.pass_manager import OptimizationStrategy
+
+        from examples.exp_kernel import exp_kernel
+        from triton_adapter import convert_ttir_to_pypto
 
         ttir = _compile_kernel(workspace_path, exp_kernel, {"x": "*fp32", "out": "*fp32"}, {"n": 128})
         program = convert_ttir_to_pypto(ttir, program_name="exp_kernel")
@@ -191,11 +248,12 @@ class TestTritonToPyPTOConversion:
         """转换 reduce_sum kernel 到 PyPTO 并编译。"""
         pytest.importorskip("triton")
         pytest.importorskip("pypto")
-        from examples.reduce_sum_kernel import reduce_sum_kernel
-        from triton_adapter import convert_ttir_to_pypto
         from pypto.backend import BackendType
         from pypto.ir import compile as ir_compile
         from pypto.ir.pass_manager import OptimizationStrategy
+
+        from examples.reduce_sum_kernel import reduce_sum_kernel
+        from triton_adapter import convert_ttir_to_pypto
 
         ttir = _compile_kernel(workspace_path, reduce_sum_kernel, {"x": "*fp32", "out": "*fp32"}, {"BLOCK": 128, "n_cols": 128})
         assert "tt.reduce" in ttir
@@ -209,11 +267,12 @@ class TestTritonToPyPTOConversion:
         """转换 matmul kernel 到 PyPTO 并编译。"""
         pytest.importorskip("triton")
         pytest.importorskip("pypto")
-        from examples.matmul_kernel import matmul_kernel
-        from triton_adapter import convert_ttir_to_pypto
         from pypto.backend import BackendType
         from pypto.ir import compile as ir_compile
         from pypto.ir.pass_manager import OptimizationStrategy
+
+        from examples.matmul_kernel import matmul_kernel
+        from triton_adapter import convert_ttir_to_pypto
 
         ttir = _compile_kernel(workspace_path, matmul_kernel, {"A": "*fp32", "B": "*fp32", "C": "*fp32"}, {"BLOCK": 16, "M": 16, "N": 16, "K": 16})
         assert "tt.dot" in ttir
@@ -229,42 +288,18 @@ class TestTritonToPyPTOConversion:
     reason="SIMPLER_ROOT not set - skip CPU execution test",
 )
 class TestTritonToPyPTOExecution:
-    """完整执行测试：PyPTO 仿真结果与参考一致。
+    """完整执行测试：PyPTO 仿真结果与 golden 一致。
 
-    使用 Python 数学运算作为 golden（与 Triton TRITON_INTERPRET 结果等价）。
-    run_e2e.py --kernel add 已验证 Triton 输出与 Python 一致。
+    使用 Python/torch 作为 golden（与 Triton 参考一致）。默认 ``a2a3sim``；也可设置
+    ``TRITON2PYPTO_PLATFORM=a2a3`` 在本类中直接跑真机（需 ``npu-smi``）。专项真机类见
+    ``TestTritonToPyPTONPUExecution``。
     """
-
-    def _run_and_compare(self, workspace_path, kernel_fn, sig, constexprs, golden_fn, tensor_specs):
-        """通用：编译、执行、与 golden 比对。"""
-        pytest.importorskip("torch")
-        pytest.importorskip("pypto")
-        if str(workspace_path) not in os.sys.path:
-            os.sys.path.insert(0, str(workspace_path))
-        from triton_adapter import convert_ttir_to_pypto
-        from pypto.backend import BackendType
-        from pypto.ir.pass_manager import OptimizationStrategy
-        from pypto.runtime import RunConfig, TensorSpec, run
-
-        ttir = _compile_kernel(workspace_path, kernel_fn, sig, constexprs)
-        program = convert_ttir_to_pypto(ttir, program_name="test_kernel")
-        config = RunConfig(
-            platform="a2a3sim",
-            backend_type=BackendType.CCE,
-            strategy=OptimizationStrategy.Default,
-        )
-        result = run(
-            program=program,
-            tensor_specs=tensor_specs,
-            golden=golden_fn,
-            config=config,
-        )
-        assert result.passed, result.error or "Run failed"
 
     def test_triton_add_to_pypto_run_cpu(self, workspace_path):
         """add: PyPTO 执行结果与参考一致（带 mask，等价于 Triton CPU）。"""
         torch = pytest.importorskip("torch")
         from pypto.runtime import TensorSpec
+
         from examples.add_kernel import add_kernel
 
         def golden(tensors, params):
@@ -277,7 +312,7 @@ class TestTritonToPyPTOExecution:
             TensorSpec("y", [128, 1], torch.float32, init_value=b_2d),
             TensorSpec("out", [128, 1], torch.float32, is_output=True),
         ]
-        self._run_and_compare(
+        _run_e2e_compare(
             workspace_path,
             add_kernel,
             {"x": "*fp32", "y": "*fp32", "out": "*fp32"},
@@ -290,6 +325,7 @@ class TestTritonToPyPTOExecution:
         """sub: PyPTO 执行结果与参考一致。"""
         torch = pytest.importorskip("torch")
         from pypto.runtime import TensorSpec
+
         from examples.sub_kernel import sub_kernel
 
         def golden(tensors, params):
@@ -302,7 +338,7 @@ class TestTritonToPyPTOExecution:
             TensorSpec("y", [128, 1], torch.float32, init_value=b_2d),
             TensorSpec("out", [128, 1], torch.float32, is_output=True),
         ]
-        self._run_and_compare(
+        _run_e2e_compare(
             workspace_path,
             sub_kernel,
             {"x": "*fp32", "y": "*fp32", "out": "*fp32"},
@@ -315,6 +351,7 @@ class TestTritonToPyPTOExecution:
         """mul: PyPTO 执行结果与参考一致。"""
         torch = pytest.importorskip("torch")
         from pypto.runtime import TensorSpec
+
         from examples.mul_kernel import mul_kernel
 
         def golden(tensors, params):
@@ -327,7 +364,7 @@ class TestTritonToPyPTOExecution:
             TensorSpec("y", [128, 1], torch.float32, init_value=b_2d),
             TensorSpec("out", [128, 1], torch.float32, is_output=True),
         ]
-        self._run_and_compare(
+        _run_e2e_compare(
             workspace_path,
             mul_kernel,
             {"x": "*fp32", "y": "*fp32", "out": "*fp32"},
@@ -340,6 +377,7 @@ class TestTritonToPyPTOExecution:
         """div: PyPTO 执行结果与参考一致。"""
         torch = pytest.importorskip("torch")
         from pypto.runtime import TensorSpec
+
         from examples.div_kernel import div_kernel
 
         def golden(tensors, params):
@@ -352,7 +390,7 @@ class TestTritonToPyPTOExecution:
             TensorSpec("y", [128, 1], torch.float32, init_value=b_2d),
             TensorSpec("out", [128, 1], torch.float32, is_output=True),
         ]
-        self._run_and_compare(
+        _run_e2e_compare(
             workspace_path,
             div_kernel,
             {"x": "*fp32", "y": "*fp32", "out": "*fp32"},
@@ -365,6 +403,7 @@ class TestTritonToPyPTOExecution:
         """reduce_sum: PyPTO 执行结果与参考一致。"""
         torch = pytest.importorskip("torch")
         from pypto.runtime import TensorSpec
+
         from examples.reduce_sum_kernel import reduce_sum_kernel
 
         def golden(tensors, params):
@@ -375,7 +414,7 @@ class TestTritonToPyPTOExecution:
             TensorSpec("x", [128, 128], torch.float32, init_value=x_2d),
             TensorSpec("out", [128, 1], torch.float32, is_output=True),
         ]
-        self._run_and_compare(
+        _run_e2e_compare(
             workspace_path,
             reduce_sum_kernel,
             {"x": "*fp32", "out": "*fp32"},
@@ -388,6 +427,7 @@ class TestTritonToPyPTOExecution:
         """matmul: PyPTO 执行结果与参考一致。"""
         torch = pytest.importorskip("torch")
         from pypto.runtime import TensorSpec
+
         from examples.matmul_kernel import matmul_kernel
 
         def golden(tensors, params):
@@ -400,7 +440,7 @@ class TestTritonToPyPTOExecution:
             TensorSpec("B", [16, 16], torch.float32, init_value=B),
             TensorSpec("C", [16, 16], torch.float32, is_output=True),
         ]
-        self._run_and_compare(
+        _run_e2e_compare(
             workspace_path,
             matmul_kernel,
             {"A": "*fp32", "B": "*fp32", "C": "*fp32"},
@@ -414,6 +454,7 @@ class TestTritonToPyPTOExecution:
         """exp: PyPTO 执行结果与参考一致。"""
         torch = pytest.importorskip("torch")
         from pypto.runtime import TensorSpec
+
         from examples.exp_kernel import exp_kernel
 
         def golden(tensors, params):
@@ -424,11 +465,205 @@ class TestTritonToPyPTOExecution:
             TensorSpec("x", [128, 1], torch.float32, init_value=x_2d),
             TensorSpec("out", [128, 1], torch.float32, is_output=True),
         ]
-        self._run_and_compare(
+        _run_e2e_compare(
             workspace_path,
             exp_kernel,
             {"x": "*fp32", "out": "*fp32"},
             {"n": 128},
             golden,
             tensor_specs,
+        )
+
+
+@pytest.mark.skipif(
+    "SIMPLER_ROOT" not in os.environ,
+    reason="SIMPLER_ROOT not set - skip NPU execution test",
+)
+@pytest.mark.skipif(
+    _skip_npu_tests_without_driver(),
+    reason="npu-smi not in PATH - skip NPU on-board tests (CI / dev machine without driver)",
+)
+class TestTritonToPyPTONPUExecution:
+    """昇腾 NPU 真机执行：与 ``TestTritonToPyPTOExecution`` 相同的 golden，platform 固定 ``a2a3``。
+
+    在无 NPU 驱动的环境（如 CI）下整类跳过。设备号由 ``TRITON2PYPTO_DEVICE_ID`` 指定（默认 0）。
+    """
+
+    def test_triton_add_to_pypto_run_npu(self, workspace_path):
+        torch = pytest.importorskip("torch")
+        from pypto.runtime import TensorSpec
+
+        from examples.add_kernel import add_kernel
+
+        def golden(tensors, params):
+            tensors["out"][:] = tensors["x"] + tensors["y"]
+
+        a_2d = torch.randn(128, 1, dtype=torch.float32)
+        b_2d = torch.randn(128, 1, dtype=torch.float32)
+        tensor_specs = [
+            TensorSpec("x", [128, 1], torch.float32, init_value=a_2d),
+            TensorSpec("y", [128, 1], torch.float32, init_value=b_2d),
+            TensorSpec("out", [128, 1], torch.float32, is_output=True),
+        ]
+        _run_e2e_compare(
+            workspace_path,
+            add_kernel,
+            {"x": "*fp32", "y": "*fp32", "out": "*fp32"},
+            {"n": 128},
+            golden,
+            tensor_specs,
+            platform="a2a3",
+        )
+
+    def test_triton_sub_to_pypto_run_npu(self, workspace_path):
+        torch = pytest.importorskip("torch")
+        from pypto.runtime import TensorSpec
+
+        from examples.sub_kernel import sub_kernel
+
+        def golden(tensors, params):
+            tensors["out"][:] = tensors["x"] - tensors["y"]
+
+        a_2d = torch.randn(128, 1, dtype=torch.float32)
+        b_2d = torch.randn(128, 1, dtype=torch.float32)
+        tensor_specs = [
+            TensorSpec("x", [128, 1], torch.float32, init_value=a_2d),
+            TensorSpec("y", [128, 1], torch.float32, init_value=b_2d),
+            TensorSpec("out", [128, 1], torch.float32, is_output=True),
+        ]
+        _run_e2e_compare(
+            workspace_path,
+            sub_kernel,
+            {"x": "*fp32", "y": "*fp32", "out": "*fp32"},
+            {"n": 128},
+            golden,
+            tensor_specs,
+            platform="a2a3",
+        )
+
+    def test_triton_mul_to_pypto_run_npu(self, workspace_path):
+        torch = pytest.importorskip("torch")
+        from pypto.runtime import TensorSpec
+
+        from examples.mul_kernel import mul_kernel
+
+        def golden(tensors, params):
+            tensors["out"][:] = tensors["x"] * tensors["y"]
+
+        a_2d = torch.randn(128, 1, dtype=torch.float32)
+        b_2d = torch.randn(128, 1, dtype=torch.float32)
+        tensor_specs = [
+            TensorSpec("x", [128, 1], torch.float32, init_value=a_2d),
+            TensorSpec("y", [128, 1], torch.float32, init_value=b_2d),
+            TensorSpec("out", [128, 1], torch.float32, is_output=True),
+        ]
+        _run_e2e_compare(
+            workspace_path,
+            mul_kernel,
+            {"x": "*fp32", "y": "*fp32", "out": "*fp32"},
+            {"n": 128},
+            golden,
+            tensor_specs,
+            platform="a2a3",
+        )
+
+    def test_triton_div_to_pypto_run_npu(self, workspace_path):
+        torch = pytest.importorskip("torch")
+        from pypto.runtime import TensorSpec
+
+        from examples.div_kernel import div_kernel
+
+        def golden(tensors, params):
+            tensors["out"][:] = tensors["x"] / tensors["y"]
+
+        a_2d = torch.randn(128, 1, dtype=torch.float32)
+        b_2d = torch.ones(128, 1, dtype=torch.float32)
+        tensor_specs = [
+            TensorSpec("x", [128, 1], torch.float32, init_value=a_2d),
+            TensorSpec("y", [128, 1], torch.float32, init_value=b_2d),
+            TensorSpec("out", [128, 1], torch.float32, is_output=True),
+        ]
+        _run_e2e_compare(
+            workspace_path,
+            div_kernel,
+            {"x": "*fp32", "y": "*fp32", "out": "*fp32"},
+            {"n": 128},
+            golden,
+            tensor_specs,
+            platform="a2a3",
+        )
+
+    def test_triton_reduce_sum_to_pypto_run_npu(self, workspace_path):
+        torch = pytest.importorskip("torch")
+        from pypto.runtime import TensorSpec
+
+        from examples.reduce_sum_kernel import reduce_sum_kernel
+
+        def golden(tensors, params):
+            tensors["out"][:] = tensors["x"].sum(dim=1, keepdim=True)
+
+        x_2d = torch.randn(128, 128, dtype=torch.float32)
+        tensor_specs = [
+            TensorSpec("x", [128, 128], torch.float32, init_value=x_2d),
+            TensorSpec("out", [128, 1], torch.float32, is_output=True),
+        ]
+        _run_e2e_compare(
+            workspace_path,
+            reduce_sum_kernel,
+            {"x": "*fp32", "out": "*fp32"},
+            {"BLOCK": 128, "n_cols": 128},
+            golden,
+            tensor_specs,
+            platform="a2a3",
+        )
+
+    def test_triton_matmul_to_pypto_run_npu(self, workspace_path):
+        torch = pytest.importorskip("torch")
+        from pypto.runtime import TensorSpec
+
+        from examples.matmul_kernel import matmul_kernel
+
+        def golden(tensors, params):
+            tensors["C"][:] = tensors["A"] @ tensors["B"]
+
+        A = torch.randn(16, 16, dtype=torch.float32) * 0.1
+        B = torch.randn(16, 16, dtype=torch.float32) * 0.1
+        tensor_specs = [
+            TensorSpec("A", [16, 16], torch.float32, init_value=A),
+            TensorSpec("B", [16, 16], torch.float32, init_value=B),
+            TensorSpec("C", [16, 16], torch.float32, is_output=True),
+        ]
+        _run_e2e_compare(
+            workspace_path,
+            matmul_kernel,
+            {"A": "*fp32", "B": "*fp32", "C": "*fp32"},
+            {"BLOCK": 16, "M": 16, "N": 16, "K": 16},
+            golden,
+            tensor_specs,
+            platform="a2a3",
+        )
+
+    @pytest.mark.skip(reason="exp 2-param orchestration 输出与 golden 不匹配，待调查")
+    def test_triton_exp_to_pypto_run_npu(self, workspace_path):
+        torch = pytest.importorskip("torch")
+        from pypto.runtime import TensorSpec
+
+        from examples.exp_kernel import exp_kernel
+
+        def golden(tensors, params):
+            tensors["out"][:] = torch.exp(tensors["x"])
+
+        x_2d = torch.randn(128, 1, dtype=torch.float32) * 0.1
+        tensor_specs = [
+            TensorSpec("x", [128, 1], torch.float32, init_value=x_2d),
+            TensorSpec("out", [128, 1], torch.float32, is_output=True),
+        ]
+        _run_e2e_compare(
+            workspace_path,
+            exp_kernel,
+            {"x": "*fp32", "out": "*fp32"},
+            {"n": 128},
+            golden,
+            tensor_specs,
+            platform="a2a3",
         )

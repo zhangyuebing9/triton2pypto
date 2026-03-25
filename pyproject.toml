@@ -59,7 +59,7 @@ select = ["E", "F", "W", "I", "UP", "B", "C4"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["triton_adapter", "pypto_backend", "passes"]
+known-first-party = ["triton_adapter", "pypto_backend", "passes", "e2e_common", "examples"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/triton_adapter/__init__.py" = ["F401"]

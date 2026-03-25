@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""统一端到端验证入口：Triton 源码 -> TTIR -> PyPTO IR -> simpler CPU 仿真 -> 结果对比。
+"""统一端到端验证入口：Triton 源码 -> TTIR -> PyPTO IR -> simpler 执行 -> 与 golden 对比。
 
 支持 kernel: add, sub, mul, div, exp, reduce_sum, matmul
+
+默认在 **CPU 仿真**（``a2a3sim``）上运行；在昇腾机器上可用 ``--platform a2a3`` 或环境变量
+``TRITON2PYPTO_PLATFORM=a2a3`` 做 **NPU 上板** 验证（与 golden 数值对比，golden 与 Triton 参考一致）。
 
 用法:
   python examples/run_e2e.py [--kernel NAME]
   python examples/run_e2e.py --kernel add   # 默认
-  python examples/run_e2e.py --kernel exp
+  python examples/run_e2e.py --platform a2a3 --device-id 0   # 真机（需 CANN / npu-smi）
   python examples/run_e2e.py --list        # 列出所有支持的 kernel
 
-需要: pypto, torch, triton, SIMPLER_ROOT=third_party/simpler
+需要: pypto, torch, triton, SIMPLER_ROOT=third_party/simpler；真机另需 CANN（ASCEND_HOME_PATH 等）
 """
 
 import argparse
@@ -21,6 +24,7 @@ import tempfile
 workspace = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(workspace, "src"))
 sys.path.insert(0, workspace)
+sys.path.insert(0, os.path.join(workspace, "examples"))
 simpler_path = os.path.join(workspace, "third_party", "simpler")
 if os.path.exists(simpler_path):
     os.environ["SIMPLER_ROOT"] = simpler_path
@@ -198,15 +202,23 @@ def _get_kernel_module_and_name(name: str):
     return mapping[name]
 
 
-def run_e2e(kernel_name: str, triton_compare: bool = False) -> int:
+def run_e2e(
+    kernel_name: str,
+    triton_compare: bool = False,
+    *,
+    platform: str | None = None,
+    device_id: int | None = None,
+) -> int:
     """执行端到端验证，返回 0 成功，非 0 失败。"""
     import torch
-    from pypto.backend import BackendType
-    from pypto.ir.pass_manager import OptimizationStrategy
-    from pypto.runtime import RunConfig, run
+    from pypto.runtime import run
     from triton.backends.compiler import GPUTarget
 
+    from e2e_common import get_e2e_device_id, get_e2e_platform, make_pypto_run_config
     from triton_adapter import convert_ttir_to_pypto
+
+    plat = platform if platform is not None else get_e2e_platform()
+    dev = device_id if device_id is not None else get_e2e_device_id()
 
     cfg = _get_kernel_config(kernel_name)
     if not cfg:
@@ -218,7 +230,8 @@ def run_e2e(kernel_name: str, triton_compare: bool = False) -> int:
     kernel_fn = getattr(mod, fn_name)
 
     print("=" * 70)
-    print(f"Triton -> PyPTO 端到端验证: {kernel_name} kernel (带 mask, CPU 仿真)")
+    run_mode = "NPU 真机 (a2a3)" if plat == "a2a3" else "CPU 仿真 (a2a3sim)"
+    print(f"Triton -> PyPTO 端到端验证: {kernel_name} kernel (带 mask, {run_mode}, device_id={dev})")
     print("=" * 70)
 
     tensors = _prepare_tensors(kernel_name)
@@ -245,7 +258,7 @@ def run_e2e(kernel_name: str, triton_compare: bool = False) -> int:
     funcs = list(program.functions.values())
     print(f"    Program: {program.name}, Functions: {[f.name for f in funcs]}")
 
-    print("\n[4] PyPTO + simpler a2a3sim 执行")
+    print(f"\n[4] PyPTO + simpler 执行 (platform={plat})")
 
     tensor_specs = cfg["tensor_specs_fn"](tensors)
 
@@ -254,11 +267,7 @@ def run_e2e(kernel_name: str, triton_compare: bool = False) -> int:
             program=program,
             tensor_specs=tensor_specs,
             golden=cfg["golden_fn"],
-            config=RunConfig(
-                platform="a2a3sim",
-                backend_type=BackendType.CCE,
-                strategy=OptimizationStrategy.Default,
-            ),
+            config=make_pypto_run_config(platform=plat, device_id=dev),
         )
         print(f"    PyPTO 运行结果: {result}")
 
@@ -314,14 +323,14 @@ torch.save({{"out": out}}, {repr(data_path + ".out")})
             if triton_vs_ref < 1e-4:
                 print("    - Triton 输出与参考一致")
                 print("\n" + "=" * 70)
-                print("✓ 验证通过: Triton->PyPTO 转换与 CPU 仿真执行正确（含 Triton 对比）")
+                print("✓ 验证通过: Triton->PyPTO 转换与执行正确（含 Triton 对比）")
             else:
                 print(f"    - Triton 对比: diff={triton_vs_ref}")
                 print("\n" + "=" * 70)
                 print("✓ PyPTO 验证通过; Triton 对比: 未通过")
         else:
             print("\n" + "=" * 70)
-            print("✓ 验证通过: Triton->PyPTO 转换与 CPU 仿真执行正确")
+            print("✓ 验证通过: Triton->PyPTO 转换与执行正确")
         print("=" * 70)
         return 0
 
@@ -355,6 +364,19 @@ def main():
         action="store_true",
         help="列出所有支持的 kernel",
     )
+    parser.add_argument(
+        "--platform",
+        "-p",
+        choices=["a2a3sim", "a2a3"],
+        default=None,
+        help="simpler/PyPTO 执行平台：a2a3sim=CPU 仿真（默认），a2a3=昇腾真机。也可用环境变量 TRITON2PYPTO_PLATFORM。",
+    )
+    parser.add_argument(
+        "--device-id",
+        type=int,
+        default=None,
+        help="NPU 设备号（仅 a2a3 有效）。默认 0。也可用 TRITON2PYPTO_DEVICE_ID。",
+    )
     args = parser.parse_args()
 
     if args.list:
@@ -363,7 +385,12 @@ def main():
             print(f"  - {k}")
         return 0
 
-    return run_e2e(args.kernel, triton_compare=args.triton_compare)
+    return run_e2e(
+        args.kernel,
+        triton_compare=args.triton_compare,
+        platform=args.platform,
+        device_id=args.device_id,
+    )
 
 
 if __name__ == "__main__":
