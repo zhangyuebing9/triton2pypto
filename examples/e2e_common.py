@@ -49,6 +49,8 @@ def make_pypto_run_config(
     device_id: int | None = None,
     backend_type: BackendType | None = None,
     strategy: OptimizationStrategy | None = None,
+    rtol: float | None = None,
+    atol: float | None = None,
 ) -> RunConfig:
     """构建与当前 E2E 策略一致的 :class:`RunConfig`。"""
     from pypto.backend import BackendType as BT
@@ -59,12 +61,17 @@ def make_pypto_run_config(
     dev = device_id if device_id is not None else get_e2e_device_id()
     bt = backend_type if backend_type is not None else BT.CCE
     st = strategy if strategy is not None else OS.Default
-    return RunConfig(
+    rc = RunConfig(
         platform=plat,
         device_id=dev,
         backend_type=bt,
         strategy=st,
     )
+    if rtol is not None:
+        rc.rtol = rtol
+    if atol is not None:
+        rc.atol = atol
+    return rc
 
 
 def pytest_skip_if_npu_platform_unavailable(platform: str) -> None:

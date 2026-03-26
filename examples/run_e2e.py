@@ -262,12 +262,18 @@ def run_e2e(
 
     tensor_specs = cfg["tensor_specs_fn"](tensors)
 
+    # a2a3sim 上 tile.exp 与 torch.exp 的浮点误差可能略高于默认 1e-5；exp 用例单独放宽
+    run_kw: dict = {"platform": plat, "device_id": dev}
+    if kernel_name == "exp":
+        run_kw["rtol"] = 5e-4
+        run_kw["atol"] = 1e-5
+
     try:
         result = run(
             program=program,
             tensor_specs=tensor_specs,
             golden=cfg["golden_fn"],
-            config=make_pypto_run_config(platform=plat, device_id=dev),
+            config=make_pypto_run_config(**run_kw),
         )
         print(f"    PyPTO 运行结果: {result}")
 

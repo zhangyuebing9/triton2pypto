@@ -4,6 +4,7 @@ This module provides a lightweight parser for MLIR text format,
 specifically targeting TTIR operations needed for Phase 1.
 """
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,12 +45,15 @@ class MLIRType:
             start = self.type_str.index("<") + 1
             end = self.type_str.rindex(">")
             inner = self.type_str[start:end]
-            # Split by 'x' but last part is dtype (e.g. f32, i32)
+            # Split by 'x' but last part is dtype (e.g. f32, i32) or ``!tt.ptr<f32>``
             parts = inner.split("x")
             if len(parts) < 2:
                 return None
+            # Last segment is element type (``f32``, ``!tt.ptr<f32>``, ...); preceding segments are
+            # dimensions (``tensor<16x16x!tt.ptr<f32>>`` -> [16, 16], not [16]).
+            dim_parts = parts[:-1]
             shape: list[int] = []
-            for p in parts[:-1]:
+            for p in dim_parts:
                 p = p.strip()
                 if p == "?" or not p[0].isdigit():
                     shape.append(1)  # Dynamic dim -> 1 for simplicity
@@ -69,7 +73,13 @@ class MLIRType:
             inner = self.type_str[start:end]
             parts = inner.split("x")
             if len(parts) >= 2:
-                return parts[-1].strip().rstrip(",")
+                raw = parts[-1].strip().rstrip(",")
+                # Block of pointers: tensor<128x!tt.ptr<f32>> — scalar dtype is inside ptr<...>
+                if "ptr" in raw and "<" in raw:
+                    m = re.search(r"ptr<([^>]+)>", raw)
+                    if m:
+                        return m.group(1).strip()
+                return raw
             return None
         except (ValueError, IndexError):
             return None
@@ -96,6 +106,44 @@ class MLIRParser:
 
     def __init__(self) -> None:
         self.current_module: list[MLIROperation] = []
+
+    @staticmethod
+    def _take_mlir_type_token(s: str) -> str:
+        """Parse one MLIR type token from *s* (handles nested ``<...>``)."""
+        s = s.strip()
+        if not s:
+            return ""
+        if "<" not in s:
+            return s.split()[0]
+        out: list[str] = []
+        depth = 0
+        started = False
+        for ch in s:
+            if ch == "<":
+                depth += 1
+                started = True
+            elif ch == ">":
+                depth -= 1
+            out.append(ch)
+            if started and depth == 0:
+                break
+        return "".join(out).strip()
+
+    def _type_after_colon(self, fragment: str) -> str | None:
+        """Return MLIR type after ``... : `` (stops before ``loc(...)``)."""
+        if ":" not in fragment:
+            return None
+        rest = fragment.split(":", 1)[1].strip()
+        if " loc(" in rest:
+            rest = rest.split(" loc(", 1)[0].strip()
+        # ``tt.reshape %x : tensor<...> -> tensor<...>``
+        if " -> " in rest:
+            _, dst = rest.split(" -> ", 1)
+            dst = dst.strip()
+            tok = self._take_mlir_type_token(dst)
+            return tok if tok else None
+        tok = self._take_mlir_type_token(rest)
+        return tok if tok else None
 
     def parse_module(self, mlir_text: str) -> list[MLIROperation]:
         """Parse MLIR module text.
@@ -201,8 +249,9 @@ class MLIRParser:
             result = self._parse_value(result_part.strip())
             type_match = result_part.strip()
             if ":" in type_match:
-                type_str = type_match.split(":")[1].strip()
-                result_types = [MLIRType(type_str)]
+                ts = self._type_after_colon(type_match)
+                if ts:
+                    result_types = [MLIRType(ts)]
 
             line = op_part.strip()
 
@@ -213,16 +262,9 @@ class MLIRParser:
 
         # Get result type from op body if not from result
         if not result_types and ":" in line and "{" not in line.split(":")[0]:
-            type_part = line.split(":", 1)[1].strip()
-            if type_part:
-                if "<" in type_part:
-                    end = type_part.find(">") + 1 if ">" in type_part else len(type_part)
-                    type_str = type_part[:end].strip()
-                else:
-                    # Scalar type: i32, f32, etc.
-                    type_str = type_part.split()[0] if type_part.split() else type_part
-                if type_str:
-                    result_types = [MLIRType(type_str)]
+            ts = self._type_after_colon(line)
+            if ts:
+                result_types = [MLIRType(ts)]
 
         return MLIROperation(
             name=op_name, result=result, operands=operands, attributes=attributes, result_types=result_types
@@ -274,9 +316,19 @@ class MLIRParser:
                     attributes = self._parse_attributes(attr_str)
                     line = line[:attr_start].strip()
 
-        if "(" in line and line.find("(") < (line.find(":") if ":" in line else len(line)):
+        paren_pos = line.find("(")
+        colon_pos = line.find(":")
+        # ``arith.constant true loc(#loc)`` has ``(`` from ``loc(``, not an operand list — do not
+        # treat as ``op(args)`` (would set op_name to ``arith.constant true loc``).
+        loc_paren = paren_pos >= 3 and line[paren_pos - 3 : paren_pos] == "loc"
+        use_paren_ops = (
+            paren_pos >= 0
+            and (colon_pos < 0 or paren_pos < colon_pos)
+            and not loc_paren
+        )
+        if use_paren_ops:
             # op(args) format
-            paren = line.index("(")
+            paren = paren_pos
             op_name = line[:paren].strip()
             # For ops with regions like "tt.reduce"(%x) ({...}), use first ) to close operands
             first_close = line.find(")", paren)

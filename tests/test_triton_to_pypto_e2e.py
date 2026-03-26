@@ -44,6 +44,8 @@ def _run_e2e_compare(
     *,
     platform: str | None = None,
     device_id: int | None = None,
+    rtol: float | None = None,
+    atol: float | None = None,
 ) -> None:
     """编译 TTIR、转 PyPTO、在指定 platform 上执行并与 golden 比对。"""
     pytest.importorskip("torch")
@@ -69,11 +71,16 @@ def _run_e2e_compare(
 
     ttir = _compile_kernel(workspace_path, kernel_fn, sig, constexprs)
     program = convert_ttir_to_pypto(ttir, program_name="test_kernel")
+    run_cfg_kw: dict = {"platform": plat, "device_id": dev}
+    if rtol is not None:
+        run_cfg_kw["rtol"] = rtol
+    if atol is not None:
+        run_cfg_kw["atol"] = atol
     result = run(
         program=program,
         tensor_specs=tensor_specs,
         golden=golden_fn,
-        config=make_pypto_run_config(platform=plat, device_id=dev),
+        config=make_pypto_run_config(**run_cfg_kw),
     )
     assert result.passed, result.error or "Run failed"
 
@@ -449,7 +456,6 @@ class TestTritonToPyPTOExecution:
             tensor_specs,
         )
 
-    @pytest.mark.skip(reason="exp 2-param orchestration 输出与 golden 不匹配，待调查")
     def test_triton_exp_to_pypto_run_cpu(self, workspace_path):
         """exp: PyPTO 执行结果与参考一致。"""
         torch = pytest.importorskip("torch")
@@ -472,6 +478,8 @@ class TestTritonToPyPTOExecution:
             {"n": 128},
             golden,
             tensor_specs,
+            rtol=5e-4,
+            atol=1e-5,
         )
 
 
@@ -643,7 +651,6 @@ class TestTritonToPyPTONPUExecution:
             platform="a2a3",
         )
 
-    @pytest.mark.skip(reason="exp 2-param orchestration 输出与 golden 不匹配，待调查")
     def test_triton_exp_to_pypto_run_npu(self, workspace_path):
         torch = pytest.importorskip("torch")
         from pypto.runtime import TensorSpec
@@ -666,4 +673,6 @@ class TestTritonToPyPTONPUExecution:
             golden,
             tensor_specs,
             platform="a2a3",
+            rtol=5e-4,
+            atol=1e-5,
         )

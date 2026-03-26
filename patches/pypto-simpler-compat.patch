@@ -1,14 +1,154 @@
+diff --git a/include/pypto/codegen/orchestration/orchestration_codegen.h b/include/pypto/codegen/orchestration/orchestration_codegen.h
+index f952227..3badaa1 100644
+--- a/include/pypto/codegen/orchestration/orchestration_codegen.h
++++ b/include/pypto/codegen/orchestration/orchestration_codegen.h
+@@ -38,7 +38,8 @@ struct OrchestrationResult {
+  *
+  * Generates C++ code using PTO2 runtime API:
+  * - aicpu_orchestration_config() returns PTO2OrchestrationConfig
+- * - aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count)
++ * - aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count,
++ *   int orch_thread_num, int orch_thread_index)
+  * - make_tensor_external / make_tensor for tensor declarations
+  * - PTOParam + pto2_rt_submit_task for task submission
+  * - No manual dependency management (runtime handles automatically)
+diff --git a/python/pypto/ir/pto_codegen.py b/python/pypto/ir/pto_codegen.py
+index 2cfc534..a20d653 100644
+--- a/python/pypto/ir/pto_codegen.py
++++ b/python/pypto/ir/pto_codegen.py
+@@ -228,7 +228,7 @@ def _generate_config_file(
+         "RUNTIME_CONFIG = {",
+         '\t"runtime": "tensormap_and_ringbuffer",',
+         '\t"aicpu_thread_num": 4,',
+-        '\t"block_dim": 24,',
++        '\t"block_dim": 18,',
+         "}\n",
+         "ORCHESTRATION = {",
+         f'\t"source": str(_ROOT_DIR / "orchestration" / "{orch_func_name}.cpp"),',
+diff --git a/src/backend/910B_CCE/backend_910b_cce_ops.cpp b/src/backend/910B_CCE/backend_910b_cce_ops.cpp
+index 0d08c45..e0c6e92 100644
+--- a/src/backend/910B_CCE/backend_910b_cce_ops.cpp
++++ b/src/backend/910B_CCE/backend_910b_cce_ops.cpp
+@@ -501,9 +501,12 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "tile.full")
+ static std::string MakeTileRowReductionCodegenCCE(const std::string& op_prefix, const ir::CallPtr& op,
+                                                   codegen::CodegenBase& codegen_base) {
+   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+-  CHECK(op->args_.size() == 2) << "TROW" << op_prefix << " requires 2 arguments";
++  CHECK(op->args_.size() >= 1) << "TROW" << op_prefix << " requires at least 1 argument";
+   std::string tile = codegen.GetExprAsCode(op->args_[0]);
+-  std::string tmp_tile = codegen.GetExprAsCode(op->args_[1]);
++  // ``tile.row_sum`` / ``tile.row_max`` pass (tile, tmp). ``tile.sum`` with axis=1 only
++  // passes the input tile; reuse it as scratch (same as explicit row_sum with shared buffer).
++  std::string tmp_tile =
++      op->args_.size() >= 2 ? codegen.GetExprAsCode(op->args_[1]) : tile;
+   std::string result = codegen.GetCurrentResultTarget();
+ 
+   codegen.Emit("TROW" + op_prefix + "(" + result + ", " + tile + ", " + tmp_tile + ");");
+diff --git a/src/codegen/cce/cce_codegen.cpp b/src/codegen/cce/cce_codegen.cpp
+index 986b364..f6704f3 100644
+--- a/src/codegen/cce/cce_codegen.cpp
++++ b/src/codegen/cce/cce_codegen.cpp
+@@ -147,7 +147,7 @@ std::string CCECodegen::GenerateConfigFile(
+   oss << "RUNTIME_CONFIG = {\n";
+   oss << "\t\"runtime\": \"tensormap_and_ringbuffer\",\n";
+   oss << "\t\"aicpu_thread_num\": 4,\n";
+-  oss << "\t\"block_dim\": 24,\n";
++  oss << "\t\"block_dim\": 18,\n";
+   oss << "}\n\n";
+ 
+   oss << "ORCHESTRATION = {\n\t\"source\": str(_ROOT_DIR / \"orchestration\" / \"" << orch_func_name
 diff --git a/src/codegen/orchestration/orchestration_codegen.cpp b/src/codegen/orchestration/orchestration_codegen.cpp
-index 943fb43..67933f5 100644
+index 943fb43..6523c74 100644
 --- a/src/codegen/orchestration/orchestration_codegen.cpp
 +++ b/src/codegen/orchestration/orchestration_codegen.cpp
-@@ -905,7 +905,8 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
+@@ -321,10 +321,9 @@ CoreType InferFunctionCoreType(const FunctionPtr& func) {
+   CoreTypeCollector collector;
+   collector.VisitStmt(func->body_);
+ 
+-  CHECK(!(collector.has_cube_ && collector.has_vector_))
+-      << "Function " << func->name_ << " contains both CUBE and VECTOR memory spaces. "
+-      << "A function can only use one core type.";
+-
++  // InCore kernels may use VECTOR loads into tiles then CUBE matmul — both MemRef spaces
++  // appear on tile args. Prefer CUBE when present so dot/matmul-heavy kernels schedule
++  // correctly; pure elementwise stays VECTOR.
+   if (collector.has_cube_) {
+     return CoreType::CUBE;
+   }
+@@ -661,7 +660,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
+   }
+ 
+   void VisitStmt_(const ReturnStmtPtr& ret) override {
+-    // No-op: return tensors are already make_tensor_external
++    // Orchestration bodies are often a single `return callee(...)` with no AssignStmt.
++    // Emit kernel submission for that call (same as GenerateFunctionCallCode on AssignStmt).
++    for (const auto& val : ret->value_) {
++      if (auto call = As<Call>(val)) {
++        const std::string& op_name = call->op_->name_;
++        if (!IsBuiltinOp(op_name)) {
++          GenerateFunctionCallCode(call, "");
++        }
++      }
++    }
+   }
+ 
+   void VisitStmt_(const SeqStmtsPtr& seq) override {
+@@ -901,11 +909,12 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
+   // 5. Config function
+   oss << GenerateConfigFunction(expected_arg_count);
+ 
+-  // 6. Entry function
++  // 6. Entry function (5 parameters to match DeviceOrchestrationFunc in simpler tensormap_and_ringbuffer)
    oss << "__attribute__((visibility(\"default\")))\n";
-   oss << "void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {\n";
+-  oss << "void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {\n";
++  oss << "void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count, int orch_thread_num, int orch_thread_index) {\n";
    oss << "    (void)arg_count;\n";
 -  oss << "    pto2_rt_init_tensor_pool(rt);  // Initialize TensorPool singleton\n\n";
-+  // pto2_rt_init_tensor_pool removed for simpler a2a3sim compatibility
-+  // oss << "    pto2_rt_init_tensor_pool(rt);  // Initialize TensorPool singleton\n\n";
++  oss << "    (void)orch_thread_num;\n";
++  oss << "    (void)orch_thread_index;\n\n";
  
    // 7. Extract arguments
    oss << "    // Extract device pointers\n";
+diff --git a/tests/ut/codegen/test_orchestration_codegen.py b/tests/ut/codegen/test_orchestration_codegen.py
+index b79d266..f631e69 100644
+--- a/tests/ut/codegen/test_orchestration_codegen.py
++++ b/tests/ut/codegen/test_orchestration_codegen.py
+@@ -144,9 +144,10 @@ class TestOrchestration:
+             }
+ 
+             __attribute__((visibility("default")))
+-            void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
++            void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count, int orch_thread_num, int orch_thread_index) {
+                 (void)arg_count;
+-                pto2_rt_init_tensor_pool(rt);  // Initialize TensorPool singleton
++                (void)orch_thread_num;
++                (void)orch_thread_index;
+ 
+                 // Extract device pointers
+                 void* arg_a_ptr = reinterpret_cast<void*>(args[ARG_PTR_A]);
+@@ -457,9 +458,10 @@ class TestOrchestration:
+             }
+ 
+             __attribute__((visibility("default")))
+-            void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
++            void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count, int orch_thread_num, int orch_thread_index) {
+                 (void)arg_count;
+-                pto2_rt_init_tensor_pool(rt);  // Initialize TensorPool singleton
++                (void)orch_thread_num;
++                (void)orch_thread_index;
+ 
+                 // Extract device pointers
+                 void* arg_a_ptr = reinterpret_cast<void*>(args[ARG_PTR_A]);
+@@ -907,9 +909,10 @@ class TestOrchestration:
+             }
+ 
+             __attribute__((visibility("default")))
+-            void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
++            void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count, int orch_thread_num, int orch_thread_index) {
+                 (void)arg_count;
+-                pto2_rt_init_tensor_pool(rt);  // Initialize TensorPool singleton
++                (void)orch_thread_num;
++                (void)orch_thread_index;
+ 
+                 // Extract device pointers
+                 void* arg_mij_ptr = reinterpret_cast<void*>(args[ARG_PTR_MIJ]);
