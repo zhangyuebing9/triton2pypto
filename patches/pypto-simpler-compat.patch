@@ -152,3 +152,29 @@ index b79d266..f631e69 100644
  
                  // Extract device pointers
                  void* arg_mij_ptr = reinterpret_cast<void*>(args[ARG_PTR_MIJ]);
+
+diff --git a/src/ir/op/tile_ops/matmul.cpp b/src/ir/op/tile_ops/matmul.cpp
+--- a/src/ir/op/tile_ops/matmul.cpp
++++ b/src/ir/op/tile_ops/matmul.cpp
+@@ -94,7 +94,9 @@ TypePtr DeduceTileMatMulType(const std::vector<ExprPtr>& args,
+   TileView tile_view;
+   tile_view.blayout = TileLayout::col_major;
+   tile_view.slayout = TileLayout::row_major;
+-  tile_view.fractal = 1024;
++  // Match default TileView::fractal (512) and lhs/rhs Vec tiles from tile.load so SimKernel /
++  // TMatmul static checks agree on fractal across operands.
++  tile_view.fractal = 512;
+   tile_view.valid_shape = output_shape;
+ 
+   return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
+@@ -179,7 +181,9 @@ TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
+   TileView tile_view;
+   tile_view.blayout = TileLayout::col_major;
+   tile_view.slayout = TileLayout::row_major;
+-  tile_view.fractal = 1024;
++  // Match default TileView::fractal (512) and lhs/rhs Vec tiles from tile.load so SimKernel /
++  // TMatmul static checks agree on fractal across operands.
++  tile_view.fractal = 512;
+   tile_view.valid_shape = output_shape;
+ 
+   return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
