@@ -224,9 +224,35 @@ class MLIRParser:
 
             op = self._parse_operation(line)
             if op and not op.name.endswith("}"):
+                op = self._fix_tt_load_result_type(op)
                 self.current_module.append(op)
 
+        self._propagate_ssa_value_types()
         return self.current_module
+
+    def _fix_tt_load_result_type(self, op: MLIROperation) -> MLIROperation:
+        """``tt.load`` lines use ``tensor<Mx!tt.ptr<T>>``; value type is ``tensor<MxT>``."""
+        name = op.name.split()[0].strip('"')
+        if name != "tt.load" or not op.result_types:
+            return op
+        ts = op.result_types[0].type_str
+        m = re.match(r"tensor<(\d+)x!tt\.ptr<([^>]+)>>", ts)
+        if m:
+            op.result_types = [MLIRType(f"tensor<{m.group(1)}x{m.group(2)}>")]
+        return op
+
+    def _propagate_ssa_value_types(self) -> None:
+        """Fill empty operand ``type_str`` from prior SSA definitions (e.g. ``tt.reduce``)."""
+        defs: dict[str, str] = {}
+        for op in self.current_module:
+            if op.result and op.result_types:
+                defs[op.result.name] = op.result_types[0].type_str
+        for op in self.current_module:
+            if not op.operands:
+                continue
+            for i, val in enumerate(op.operands):
+                if not val.type_str and val.name in defs:
+                    op.operands[i] = MLIRValue(val.name, defs[val.name])
 
     def _parse_operation(self, line: str) -> MLIROperation | None:
         """Parse a single MLIR operation line.

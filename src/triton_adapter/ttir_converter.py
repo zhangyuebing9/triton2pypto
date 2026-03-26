@@ -12,7 +12,7 @@ from pypto import DataType, ir
 from pypto.ir.op import tile
 
 from .exceptions import ConversionError, UnsupportedOpError
-from .mlir_parser import MLIROperation, MLIRParser, MLIRValue
+from .mlir_parser import MLIROperation, MLIRParser, MLIRType, MLIRValue
 
 
 def _ttir_op_basename(op_name: str | None) -> str:
@@ -929,11 +929,12 @@ class TTIRToPyptoConverter:
         self.value_map[self._value_key(op.result)] = result_var
 
     def _convert_tt_reduce(self, op: MLIROperation) -> None:
-        """Convert ``tt.reduce`` (e.g. ``tl.sum``) to ``tile.sum`` / ``tile.max``.
+        """Convert ``tt.reduce`` (e.g. ``tl.sum``) to ``tile.sum`` / ``tile.max`` / ``tile.row_*``.
 
-        ``tl.sum`` on a 1D block uses ``axis=0``; with ``tt.load`` as ``[N, 1]`` that is
-        ``tile.sum(..., axis=0, keepdim=False)`` (scalar). Pair with scalar ``tt.store``
-        handling in ``_convert_tt_store``.
+        Triton emits ``tensor<NxT>`` with ``axis=0`` for a row-wise ``tl.sum`` over a 1D
+        block (``tensor<Nxf32>``). Map that to ``tile.row_sum`` / ``tile.row_max`` after
+        ``reshape`` to ``[1, N]`` so PTO-ISA SimKernel uses TROWSUM (aligned with
+        ``[N,1]`` + ``axis=1``). True column reduction stays on ``tile.sum`` / ``tile.max``.
         """
         if not op.result or not op.operands:
             return
@@ -954,8 +955,34 @@ class TTIRToPyptoConverter:
             if "maximumf" in attr_str or "maxnumf" in attr_str:
                 reduce_kind = "max"
 
-        if axis == 0:
-            # 1D block is ``[N, 1]``; ``tl.sum(..., axis=0)`` → ``tile.sum(..., axis=0)`` (row reduction).
+        operand_ty = MLIRType(op.operands[0].type_str)
+        in_shape = operand_ty.get_shape() if operand_ty.is_tensor() else None
+        one_d_row_reduce = (
+            axis == 0
+            and in_shape is not None
+            and len(in_shape) == 1
+            and in_shape[0] > 1
+        )
+
+        if one_d_row_reduce:
+            assert in_shape is not None
+            n = int(in_shape[0])
+            elem_dtype = DataType.FP32
+            et = operand_ty.get_element_type()
+            if et:
+                try:
+                    elem_dtype = self.type_mapper.map_dtype(et)
+                except ConversionError:
+                    elem_dtype = DataType.FP32
+            reshaped = tile.reshape(inp, [1, n], span=self.span)
+            reshaped_v = self.ib.let(f"reduce_rs_{op.result.name}".replace("%", ""), reshaped)
+            tmp = tile.full([1, n], elem_dtype, 0, span=self.span)
+            tmp_v = self.ib.let(f"reduce_tmp_{self._tmp_id()}", tmp)
+            if reduce_kind == "max":
+                result_expr = tile.row_max(reshaped_v, tmp_v, span=self.span)
+            else:
+                result_expr = tile.row_sum(reshaped_v, tmp_v, span=self.span)
+        elif axis == 0:
             if reduce_kind == "max":
                 result_expr = tile.max(inp, axis=0, keepdim=False, span=self.span)
             else:
