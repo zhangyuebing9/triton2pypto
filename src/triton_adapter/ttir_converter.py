@@ -258,18 +258,66 @@ class TTIRToPyptoConverter:
             arg_names.sort(key=lambda x: int(x.replace("%arg", "")))
 
         with self.ib.program(program_name) as p:
-            incore_func = self._build_incore_function(
+            incore_func, output_indices = self._build_incore_function(
                 func_name, arg_names, body_ops, operations
             )
             if incore_func:
                 p.add_function(incore_func)
             orch_func = self._build_orchestration_function(
-                func_name, arg_names, body_ops, incore_func
+                func_name, arg_names, body_ops, incore_func, output_indices
             )
             if orch_func:
                 p.add_function(orch_func)
 
         return p.get_result()
+
+    def _prescan_args(
+        self, body_ops: list[MLIROperation], arg_names: list[str]
+    ) -> tuple[set[str], set[str]]:
+        """Pre-scan body ops to identify pointer args (tensor) and store destinations.
+
+        Args:
+            body_ops: TTIR body operations.
+            arg_names: Kernel function parameter names (e.g. ``["%x", "%y", "%out"]``).
+
+        Returns:
+            (ptr_args, store_dest_args) — sets of parameter names that are pointers /
+            store destinations.
+        """
+        arg_name_set = set(arg_names)
+        ptr_args: set[str] = set()
+        store_dests: set[str] = set()
+        ptr_trace: dict[str, str] = {}
+
+        for op in body_ops:
+            op_base = _ttir_op_basename(op.name)
+            if op_base == "tt.splat" and op.result and op.operands:
+                base_key = self._value_key(op.operands[0])
+                result_key = self._value_key(op.result)
+                ptr_trace[result_key] = base_key
+                if base_key in arg_name_set:
+                    ptr_args.add(base_key)
+            elif op_base == "tt.addptr" and op.result and len(op.operands) >= 2:
+                ptr_key = self._value_key(op.operands[0])
+                base_key = ptr_trace.get(ptr_key, ptr_key)
+                result_key = self._value_key(op.result)
+                ptr_trace[result_key] = base_key
+            elif op_base == "tt.store" and len(op.operands) >= 2:
+                ptr_key = self._value_key(op.operands[0])
+                base_key = ptr_trace.get(ptr_key, ptr_key)
+                if base_key in arg_name_set:
+                    store_dests.add(base_key)
+                    ptr_args.add(base_key)
+            elif op_base == "tt.load" and op.operands:
+                ptr_key = self._value_key(op.operands[0])
+                base_key = ptr_trace.get(ptr_key, ptr_key)
+                if base_key in arg_name_set:
+                    ptr_args.add(base_key)
+            elif op_base == "tt.make_block_ptr" and op.operands:
+                base_key = self._value_key(op.operands[0])
+                if base_key in arg_name_set:
+                    ptr_args.add(base_key)
+        return ptr_args, store_dests
 
     def _build_incore_function(
         self,
@@ -277,12 +325,15 @@ class TTIRToPyptoConverter:
         arg_names: list[str],
         body_ops: list[MLIROperation],
         all_ops: list[MLIROperation],
-    ) -> ir.Function | None:
-        """Build InCore function from TTIR body."""
-        if not body_ops:
-            return None
+    ) -> tuple[ir.Function | None, set[int]]:
+        """Build InCore function from TTIR body.
 
-        # Detect program_id use - need pid params
+        Returns:
+            Tuple of (Function, set of output param indices among arg_names).
+        """
+        if not body_ops:
+            return None, set()
+
         need_pid = set()
         for op in body_ops:
             if op.name in ("tt.get_program_id", "tt.program_id"):
@@ -300,6 +351,8 @@ class TTIRToPyptoConverter:
                         axis = 0
                 need_pid.add(axis)
 
+        ptr_args, store_dest_args = self._prescan_args(body_ops, arg_names)
+
         shape, dtype = self._infer_kernel_tensor_shape_dtype(body_ops)
 
         self.value_map.clear()
@@ -309,20 +362,25 @@ class TTIRToPyptoConverter:
         self._last_store_dest_param = None
 
         tensor_type = ir.TensorType(shape, dtype)
+        output_indices: set[int] = set()
+
         with self.ib.function(
             f"{func_name}_incore", type=ir.FunctionType.InCore
         ) as f:
             params: list[ir.Var] = []
             for i, arg_name in enumerate(arg_names):
                 pname = arg_name.lstrip("%")
-                if i < 3:
-                    param = f.param(pname, tensor_type)
-                    params.append(param)
-                    self.value_map[arg_name] = param
+                is_ptr = arg_name in ptr_args
+                is_output = arg_name in store_dest_args
+                if is_output:
+                    output_indices.add(i)
+                if is_ptr:
+                    direction = ir.ParamDirection.Out if is_output else ir.ParamDirection.In
+                    param = f.param(pname, tensor_type, direction=direction)
                 else:
                     param = f.param(pname, ir.ScalarType(DataType.INT64))
-                    params.append(param)
-                    self.value_map[arg_name] = param
+                params.append(param)
+                self.value_map[arg_name] = param
 
             for axis in sorted(need_pid):
                 pid_param = f.param(f"pid_{axis}", ir.ScalarType(DataType.INT64))
@@ -335,25 +393,23 @@ class TTIRToPyptoConverter:
                     continue
                 self._convert_op(op)
 
-            return_stmt_ops = [o for o in all_ops if _op_starts_with(o.name, "tt.return")]
-            if return_stmt_ops and return_stmt_ops[0].operands:
-                last_val = self._get_operand(return_stmt_ops[0].operands[0])
-                self.ib.return_stmt(last_val)
-            elif self._last_store_dest_param is not None:
-                # Triton often omits tt.return operands; we must not return the last
-                # computed tile (e.g. exp result) or CCE adds a spurious output tensor
-                # and mis-indexes kernel_entry args (breaks tt.store to output buffer).
-                self.ib.return_stmt(self._last_store_dest_param)
-            elif self._last_store_result is not None:
+            if self._last_store_result is not None:
                 self.ib.return_stmt(self._last_store_result)
-            elif body_ops:
-                last_op = body_ops[-1]
-                if last_op.result:
-                    last_val = self.value_map.get(self._value_key(last_op.result))
-                    if last_val:
-                        self.ib.return_stmt(last_val)
+            elif self._last_store_dest_param is not None:
+                self.ib.return_stmt(self._last_store_dest_param)
+            else:
+                return_stmt_ops = [o for o in all_ops if _op_starts_with(o.name, "tt.return")]
+                if return_stmt_ops and return_stmt_ops[0].operands:
+                    last_val = self._get_operand(return_stmt_ops[0].operands[0])
+                    self.ib.return_stmt(last_val)
+                elif body_ops:
+                    last_op = body_ops[-1]
+                    if last_op.result:
+                        last_val = self.value_map.get(self._value_key(last_op.result))
+                        if last_val:
+                            self.ib.return_stmt(last_val)
 
-        return f.get_result()
+        return f.get_result(), output_indices
 
     def _build_orchestration_function(
         self,
@@ -361,27 +417,48 @@ class TTIRToPyptoConverter:
         arg_names: list[str],
         body_ops: list[MLIROperation],
         incore_func: ir.Function | None,
+        output_indices: set[int] | None = None,
     ) -> ir.Function | None:
-        """Build Orchestration function that calls InCore."""
+        """Build Orchestration function that calls InCore.
+
+        All tensor args (inputs and outputs) become orchestration parameters so
+        the C++ codegen creates ``make_tensor_external`` for each, linking them
+        to host-provided buffers.
+        """
         if not incore_func or len(arg_names) < 2:
             return None
+        if output_indices is None:
+            output_indices = set()
 
         shape, dtype = self._infer_kernel_tensor_shape_dtype(body_ops)
-
         tensor_type = ir.TensorType(shape, dtype)
-        num_tensor_params = min(3, len(arg_names))
-        pnames = [n.lstrip("%") for n in arg_names[:num_tensor_params]]
+
+        ptr_args, _ = self._prescan_args(body_ops, arg_names)
+        num_tensor_params = sum(1 for a in arg_names if a in ptr_args)
+
+        pnames = [n.lstrip("%") for n in arg_names if n in ptr_args]
+
         with self.ib.function(
             "main", type=ir.FunctionType.Orchestration
         ) as f:
-            orch_params = [f.param(pnames[i] if i < len(pnames) else f"arg{i}", tensor_type) for i in range(num_tensor_params)]
-            call_args: list[ir.Expr] = list(orch_params)
-            # Add pid constants for incore params beyond tensor args
+            orch_params: list[ir.Var] = []
+            call_args: list[ir.Expr] = []
+
+            for i, arg_name in enumerate(arg_names):
+                if arg_name not in ptr_args:
+                    continue
+                pname = arg_name.lstrip("%")
+                param = f.param(pname, tensor_type)
+                orch_params.append(param)
+                call_args.append(param)
+
             for i in range(len(orch_params), len(incore_func.params)):
                 call_args.append(ir.ConstInt(0, DataType.INT64, self.span))
+
             call_args = call_args[: len(incore_func.params)]
-            out = ir.Call(ir.GlobalVar(incore_func.name), call_args, self.span)
-            self.ib.return_stmt(out)
+            call_expr = ir.Call(ir.GlobalVar(incore_func.name), call_args, self.span)
+            result_var = self.ib.let("result", call_expr)
+            self.ib.return_stmt(result_var)
         return f.get_result()
 
     def _convert_op(self, op: MLIROperation) -> None:
