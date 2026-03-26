@@ -65,7 +65,6 @@ def make_pypto_run_config(
         device_id=dev,
         backend_type=bt,
         strategy=st,
-        enable_profiling=enable_profiling,
     )
     if rtol is not None:
         rc.rtol = rtol
