@@ -32,9 +32,7 @@ def get_e2e_platform() -> str:
     """从环境变量读取目标平台，默认 ``a2a3sim``。"""
     raw = os.environ.get("TRITON2PYPTO_PLATFORM", "a2a3sim").strip().lower()
     if raw not in ("a2a3", "a2a3sim"):
-        raise ValueError(
-            f"TRITON2PYPTO_PLATFORM must be 'a2a3' or 'a2a3sim', got {raw!r}"
-        )
+        raise ValueError(f"TRITON2PYPTO_PLATFORM must be 'a2a3' or 'a2a3sim', got {raw!r}")
     return raw
 
 
@@ -51,6 +49,7 @@ def make_pypto_run_config(
     strategy: OptimizationStrategy | None = None,
     rtol: float | None = None,
     atol: float | None = None,
+    enable_profiling: bool = False,
 ) -> RunConfig:
     """构建与当前 E2E 策略一致的 :class:`RunConfig`。"""
     from pypto.backend import BackendType as BT
@@ -66,6 +65,7 @@ def make_pypto_run_config(
         device_id=dev,
         backend_type=bt,
         strategy=st,
+        enable_profiling=enable_profiling,
     )
     if rtol is not None:
         rc.rtol = rtol

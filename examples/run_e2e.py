@@ -208,6 +208,7 @@ def run_e2e(
     *,
     platform: str | None = None,
     device_id: int | None = None,
+    enable_profiling: bool = False,
 ) -> int:
     """执行端到端验证，返回 0 成功，非 0 失败。"""
     import torch
@@ -231,7 +232,10 @@ def run_e2e(
 
     print("=" * 70)
     run_mode = "NPU 真机 (a2a3)" if plat == "a2a3" else "CPU 仿真 (a2a3sim)"
-    print(f"Triton -> PyPTO 端到端验证: {kernel_name} kernel (带 mask, {run_mode}, device_id={dev})")
+    profiling_status = " [PROFILING ON]" if enable_profiling else ""
+    print(
+        f"Triton -> PyPTO 端到端验证：{kernel_name} kernel (带 mask, {run_mode}{profiling_status}, device_id={dev})"
+    )
     print("=" * 70)
 
     tensors = _prepare_tensors(kernel_name)
@@ -263,7 +267,7 @@ def run_e2e(
     tensor_specs = cfg["tensor_specs_fn"](tensors)
 
     # a2a3sim 上 tile.exp 与 torch.exp 的浮点误差可能略高于默认 1e-5；exp 用例单独放宽
-    run_kw: dict = {"platform": plat, "device_id": dev}
+    run_kw: dict = {"platform": plat, "device_id": dev, "enable_profiling": enable_profiling}
     if kernel_name == "exp":
         run_kw["rtol"] = 5e-4
         run_kw["atol"] = 1e-5
@@ -383,6 +387,11 @@ def main():
         default=None,
         help="NPU 设备号（仅 a2a3 有效）。默认 0。也可用 TRITON2PYPTO_DEVICE_ID。",
     )
+    parser.add_argument(
+        "--enable-profiling",
+        action="store_true",
+        help="启用 profiling（仅 a2a3 有效）",
+    )
     args = parser.parse_args()
 
     if args.list:
@@ -396,6 +405,7 @@ def main():
         triton_compare=args.triton_compare,
         platform=args.platform,
         device_id=args.device_id,
+        enable_profiling=args.enable_profiling,
     )
 
 
