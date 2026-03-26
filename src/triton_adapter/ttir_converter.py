@@ -141,6 +141,7 @@ class TTIRToPyptoConverter:
         self.span = ir.Span.unknown()
         self._last_store_result: ir.Expr | None = None
         self._last_store_dest_param: ir.Var | None = None
+        self._has_dot = False  # True if kernel contains tt.dot (matmul)
     def _tmp_id(self) -> int:
         """Generate a unique temporary ID."""
         self._tmp_counter += 1
@@ -289,34 +290,46 @@ class TTIRToPyptoConverter:
         store_dests: set[str] = set()
         ptr_trace: dict[str, str] = {}
 
+        def _resolve_base(key: str) -> str:
+            """Follow ptr_trace chain to the root."""
+            visited: set[str] = set()
+            while key in ptr_trace and key not in visited:
+                visited.add(key)
+                key = ptr_trace[key]
+            return key
+
         for op in body_ops:
             op_base = _ttir_op_basename(op.name)
             if op_base == "tt.splat" and op.result and op.operands:
                 base_key = self._value_key(op.operands[0])
                 result_key = self._value_key(op.result)
-                ptr_trace[result_key] = base_key
-                if base_key in arg_name_set:
-                    ptr_args.add(base_key)
+                root = _resolve_base(base_key)
+                ptr_trace[result_key] = root
+                if root in arg_name_set:
+                    ptr_args.add(root)
             elif op_base == "tt.addptr" and op.result and len(op.operands) >= 2:
                 ptr_key = self._value_key(op.operands[0])
-                base_key = ptr_trace.get(ptr_key, ptr_key)
+                root = _resolve_base(ptr_key)
                 result_key = self._value_key(op.result)
-                ptr_trace[result_key] = base_key
+                ptr_trace[result_key] = root
+                if root in arg_name_set:
+                    ptr_args.add(root)
             elif op_base == "tt.store" and len(op.operands) >= 2:
                 ptr_key = self._value_key(op.operands[0])
-                base_key = ptr_trace.get(ptr_key, ptr_key)
-                if base_key in arg_name_set:
-                    store_dests.add(base_key)
-                    ptr_args.add(base_key)
+                root = _resolve_base(ptr_key)
+                if root in arg_name_set:
+                    store_dests.add(root)
+                    ptr_args.add(root)
             elif op_base == "tt.load" and op.operands:
                 ptr_key = self._value_key(op.operands[0])
-                base_key = ptr_trace.get(ptr_key, ptr_key)
-                if base_key in arg_name_set:
-                    ptr_args.add(base_key)
+                root = _resolve_base(ptr_key)
+                if root in arg_name_set:
+                    ptr_args.add(root)
             elif op_base == "tt.make_block_ptr" and op.operands:
                 base_key = self._value_key(op.operands[0])
-                if base_key in arg_name_set:
-                    ptr_args.add(base_key)
+                root = _resolve_base(base_key)
+                if root in arg_name_set:
+                    ptr_args.add(root)
         return ptr_args, store_dests
 
     def _build_incore_function(
@@ -352,6 +365,10 @@ class TTIRToPyptoConverter:
                 need_pid.add(axis)
 
         ptr_args, store_dest_args = self._prescan_args(body_ops, arg_names)
+
+        self._has_dot = any(
+            _ttir_op_basename(op.name) == "tt.dot" for op in body_ops
+        )
 
         shape, dtype = self._infer_kernel_tensor_shape_dtype(body_ops)
 
@@ -605,7 +622,11 @@ class TTIRToPyptoConverter:
         self._convert_tt_program_id(op)
 
     def _convert_tt_load(self, op: MLIROperation) -> None:
-        """Convert tt.load to tile.load."""
+        """Convert tt.load to tile.load.
+
+        Uses ``MemorySpace.Mat`` (L1) for matmul kernels so loads are compatible
+        with the CUBE core, and ``MemorySpace.Vec`` for all other kernels.
+        """
         if not op.result or not op.operands:
             return
         ptr = op.operands[0]
@@ -633,8 +654,9 @@ class TTIRToPyptoConverter:
         elif len(shape) > 2:
             shape = shape[:2]
         offsets = [0] * len(shape)
+        target_mem = ir.MemorySpace.Mat if self._has_dot else ir.MemorySpace.Vec
         load_call = tile.load(
-            tensor_var, offsets, shape, span=self.span
+            tensor_var, offsets, shape, target_memory=target_mem, span=self.span
         )
         result_var = self.ib.let(
             op.result.name.replace("%", "load_"),
@@ -989,16 +1011,21 @@ class TTIRToPyptoConverter:
         self.value_map[self._value_key(op.result)] = result_var
 
     def _convert_tt_dot(self, op: MLIROperation) -> None:
-        """Convert ``tt.dot`` to two-argument ``tile.matmul``.
+        """Convert ``tt.dot`` to ``tile.move`` + ``tile.matmul``.
 
-        Ignore Triton's third accumulator operand: scalar or 1×1 acc tiles break CPU sim and
-        ``matmul_acc`` codegen; ``acc=0`` is equivalent to ``matmul(lhs, rhs)``.
+        CUBE matmul requires operands in Left/Right memory spaces. Insert
+        ``tile.move`` before the matmul. Ignore Triton's third accumulator
+        operand (acc=0 is equivalent to ``matmul(lhs, rhs)``).
         """
         if not op.result or len(op.operands) < 2:
             return
         lhs = self._get_operand(op.operands[0])
         rhs = self._get_operand(op.operands[1])
-        result_expr = tile.matmul(lhs, rhs, span=self.span)
+        lhs_left = tile.move(lhs, target_memory=ir.MemorySpace.Left, span=self.span)
+        lhs_var = self.ib.let(f"dot_lhs_{self._tmp_id()}", lhs_left)
+        rhs_right = tile.move(rhs, target_memory=ir.MemorySpace.Right, span=self.span)
+        rhs_var = self.ib.let(f"dot_rhs_{self._tmp_id()}", rhs_right)
+        result_expr = tile.matmul(lhs_var, rhs_var, span=self.span)
         result_var = self.ib.let(
             f"dot_{op.result.name}".replace("%", ""),
             result_expr,
@@ -1006,11 +1033,11 @@ class TTIRToPyptoConverter:
         self.value_map[self._value_key(op.result)] = result_var
 
     def _convert_tt_reduce(self, op: MLIROperation) -> None:
-        """Convert ``tt.reduce`` (e.g. ``tl.sum``) to ``tile.sum`` / ``tile.max``.
+        """Convert ``tt.reduce`` to ``tile.row_sum`` / ``tile.sum`` / ``tile.max``.
 
-        ``tl.sum`` on a 1D block uses ``axis=0``; with ``tt.load`` as ``[N, 1]`` that is
-        ``tile.sum(..., axis=0, keepdim=False)`` (scalar). Pair with scalar ``tt.store``
-        handling in ``_convert_tt_store``.
+        For 1D reductions (e.g. ``tl.sum`` on a 1D block), use ``tile.row_sum``
+        which avoids producing sub-alignment tiles. A temporary tile is allocated
+        for the ``row_sum`` intermediate.
         """
         if not op.result or not op.operands:
             return
@@ -1031,17 +1058,35 @@ class TTIRToPyptoConverter:
             if "maximumf" in attr_str or "maxnumf" in attr_str:
                 reduce_kind = "max"
 
-        if axis == 0:
-            # 1D block is ``[N, 1]``; ``tl.sum(..., axis=0)`` → ``tile.sum(..., axis=0)`` (row reduction).
-            if reduce_kind == "max":
-                result_expr = tile.max(inp, axis=0, keepdim=False, span=self.span)
+        inp_type = inp.type
+        inp_shape = None
+        if isinstance(inp_type, ir.TileType):
+            inp_shape = list(inp_type.shape)
+
+        use_row_sum = False
+        if inp_shape and len(inp_shape) == 2 and reduce_kind == "sum":
+            rows, cols = inp_shape
+            if cols == 1 and axis == 0:
+                use_row_sum = True
+            elif rows >= 8 and axis == 1:
+                use_row_sum = True
+
+        if use_row_sum:
+            if inp_shape and inp_shape[1] == 1:
+                new_shape = [1, inp_shape[0]]
+                reshaped = tile.reshape(inp, new_shape, span=self.span)
+                inp_var = self.ib.let(f"reshape_for_reduce_{self._tmp_id()}", reshaped)
+                tmp = tile.full(new_shape, DataType.FP32, 0.0, span=self.span)
+                tmp_var = self.ib.let(f"reduce_tmp_{self._tmp_id()}", tmp)
+                result_expr = tile.row_sum(inp_var, tmp_var, span=self.span)
             else:
-                result_expr = tile.sum(inp, axis=0, keepdim=False, span=self.span)
+                tmp = tile.full(inp_shape, DataType.FP32, 0.0, span=self.span)
+                tmp_var = self.ib.let(f"reduce_tmp_{self._tmp_id()}", tmp)
+                result_expr = tile.row_sum(inp, tmp_var, span=self.span)
+        elif reduce_kind == "max":
+            result_expr = tile.max(inp, axis=axis, keepdim=True, span=self.span)
         else:
-            if reduce_kind == "max":
-                result_expr = tile.max(inp, axis=axis, keepdim=True, span=self.span)
-            else:
-                result_expr = tile.sum(inp, axis=axis, keepdim=True, span=self.span)
+            result_expr = tile.sum(inp, axis=axis, keepdim=True, span=self.span)
 
         result_var = self.ib.let(
             f"reduce_{op.result.name}".replace("%", ""),
