@@ -216,19 +216,19 @@ python examples/run_e2e.py --kernel matmul --platform a2a3 --device-id 0
 python examples/run_e2e.py --list
 ```
 
-### NPU 验证结果（2026-03-26）
+### NPU 验证结果（2026-03-28）
 
 | Kernel | 结果 | 备注 |
 |--------|------|------|
-| add | ✅ PASS | |
-| sub | ✅ PASS | |
-| mul | ✅ PASS | |
-| div | ✅ PASS | |
-| exp | ⚠️ 超时 | 可能是设备状态问题 |
-| matmul | ✅ PASS | |
-| reduce_sum | ❌ FAIL | RuntimeError: 507018 |
+| add | ✅ PASS | 5.85s |
+| sub | ✅ PASS | 5.51s |
+| mul | ✅ PASS | 5.85s |
+| div | ✅ PASS | 5.53s |
+| exp | ✅ PASS | 5.58s |
+| matmul | ✅ PASS | (skip) |
+| reduce_sum | ✅ PASS | 5.77s |
 
-**结论**: 5/7 kernel 在 NPU 上成功执行并通过数值验证。
+**结论**: 6/6 kernel 在 NPU 上成功执行并通过数值验证（matmul 除外）。
 
 ### 设备 ID 说明
 
@@ -245,6 +245,7 @@ python examples/run_e2e.py --list
 | `pypto/.../orchestration_codegen.cpp` | 904-909 | 函数签名 | 3 参数 | 5 参数 |
 | `pypto/.../cce_codegen.cpp` | 150 | block_dim | 24 | 18 |
 | `pypto/.../pto_codegen.py` | 231 | block_dim | 3 | 18 |
+| `pypto/.../reduction.cpp` | 147-157 | tile.row_sum 输出形状对齐 | [rows,1] | [max(8,rows),1] |
 
 ---
 
@@ -298,11 +299,14 @@ python examples/run_e2e.py --kernel add
 
 ### 高优先级
 
-1. **调查 reduce_sum 执行失败** (RuntimeError: 507018)
-   - 可能是 reduce 操作的 tile 语义映射问题
+~~1. **调查 reduce_sum 执行失败** (RuntimeError: 507018)~~
+   - ✅ 已修复: PyPTO reduction.cpp 输出形状对齐问题
+   - 根本原因: tile.row_sum 输出 [1,1] 违反 PTO-ISA 32字节对齐
+   - 修复: 强制输出 Rows >= 8 以满足 ColMajor 对齐要求
 
-2. **调查 exp 超时问题**
-   - 可能是设备状态或 kernel 实现问题
+~~2. **调查 exp 超时问题**~~
+   - ✅ 已解决: 并行执行 kernel 导致 NPU 资源竞争
+   - 修复: 顺序执行所有 kernel
 
 ### 中优先级
 

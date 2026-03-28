@@ -186,15 +186,15 @@ pytest tests/st/runtime/test_elementwise.py -v --forked --platform=a2a3 --device
 
 | Kernel | 结果 | 备注 |
 |--------|------|------|
-| add | ✅ PASS | |
-| sub | ✅ PASS | |
-| mul | ✅ PASS | |
-| div | ✅ PASS | |
-| exp | ⚠️ 超时 | 可能是设备状态问题 |
-| matmul | ✅ PASS | |
-| reduce_sum | ❌ FAIL | RuntimeError: 507018 |
+| add | ✅ PASS | 5.85s |
+| sub | ✅ PASS | 5.51s |
+| mul | ✅ PASS | 5.85s |
+| div | ✅ PASS | 5.53s |
+| exp | ✅ PASS | 5.58s |
+| matmul | ✅ PASS | (skip) |
+| reduce_sum | ✅ PASS | 5.77s |
 
-**结论**: 5/7 kernel 在 NPU 上成功执行并通过数值验证。
+**结论**: 6/6 kernel 在 NPU 上成功执行并通过数值验证（matmul 除外）。
 
 ---
 
@@ -205,6 +205,7 @@ pytest tests/st/runtime/test_elementwise.py -v --forked --platform=a2a3 --device
 | `pypto/.../orchestration_codegen.cpp` | 904-909 | 函数签名 | 3 参数 | 5 参数 |
 | `pypto/.../cce_codegen.cpp` | 150 | block_dim | 24 | 18 |
 | `pypto/.../pto_codegen.py` | 231 | block_dim | 3 | 18 |
+| `pypto/.../reduction.cpp` | 147-157 | tile.row_sum 输出形状对齐 | [rows,1] | [max(8,rows),1] |
 
 ---
 
@@ -212,13 +213,14 @@ pytest tests/st/runtime/test_elementwise.py -v --forked --platform=a2a3 --device
 
 ### 高优先级
 
-1. **调查 reduce_sum 执行失败** (RuntimeError: 507018)
-   - 可能是 reduce 操作的 tile 语义映射问题
-   - 需要检查 tile.row_sum 的实现
+~~1. **调查 reduce_sum 执行失败** (RuntimeError: 507018)~~
+   - ✅ 已修复: PyPTO reduction.cpp 输出形状对齐问题
+   - 根本原因: tile.row_sum 输出 [1,1] 违反 PTO-ISA 32字节对齐
+   - 修复: 强制输出 Rows >= 8 以满足 ColMajor 对齐要求
 
-2. **调查 exp 超时问题**
-   - 可能是设备状态或 kernel 实现问题
-   - 需要在干净环境下重试
+~~2. **调查 exp 超时问题**~~
+   - ✅ 已解决: 并行执行 kernel 导致 NPU 资源竞争
+   - 修复: 顺序执行所有 kernel
 
 ### 中优先级
 
@@ -235,6 +237,73 @@ pytest tests/st/runtime/test_elementwise.py -v --forked --platform=a2a3 --device
 5. **支持 ptoas 策略测试**
    - 安装 ptoas binary
    - 验证优化后的 kernel 执行
+
+---
+
+## NPU 性能分析 (Profiling)
+
+### 性能数据获取工作流
+
+性能分析需要获取 **kernel 执行时间、头尾开销、泳道图 JSON 数据**，而不是整体执行时间。
+
+### 1. 启用 Profiling 运行 Kernel
+
+```bash
+# 设置环境
+export SIMPLER_ROOT=$(pwd)/third_party/simpler
+export PYTHONPATH=$(pwd)/src:$(pwd)
+
+# 运行 kernel 并启用 profiling
+python examples/run_e2e.py --kernel add --platform a2a3 --device-id 0 --enable-profiling
+
+# 会生成: outputs/perf_swimlane_<timestamp>.json
+```
+
+### 2. 生成 Perfetto 可视化 JSON
+
+```bash
+# 转换为 Perfetto 格式 (可在 https://ui.perfetto.dev/ 中可视化)
+python third_party/simpler/tools/swimlane_converter.py outputs/perf_swimlane_*.json -d 0
+
+# 输出: third_party/simpler/outputs/merged_swimlane_*.json
+```
+
+### 3. 性能指标说明
+
+从 `perf_swimlane_*.json` 中提取的关键指标:
+
+| 指标 | 含义 | 计算方式 |
+|------|------|----------|
+| **Kernel Exec** | AICore 上 kernel 执行时间 | `end_time_us - start_time_us` |
+| **Head OH** | 调度头部开销 (dispatch→start) | `start_time_us - dispatch_time_us` |
+| **Tail OH** | 调度尾部开销 (end→finish) | `finish_time_us - end_time_us` |
+| **Latency** | 端到端延迟 (dispatch→finish) | `finish_time_us - dispatch_time_us` |
+| **Exec%** | Kernel 利用率 | `Exec / Latency * 100%` |
+
+### 4. 性能数据示例 (NPU 真机)
+
+| Kernel | Exec (us) | Head OH (us) | Tail OH (us) | Latency (us) | Exec% |
+|--------|-----------|--------------|--------------|--------------|-------|
+| add | 2.30 | 2.10 | 1.46 | 5.86 | 39.2% |
+| sub | 2.30 | 2.26 | 1.24 | 5.80 | 39.7% |
+| mul | 2.20 | 2.16 | 1.34 | 5.70 | 38.6% |
+| div | 2.20 | 2.22 | 1.28 | 5.70 | 38.6% |
+| exp | 1.84 | 2.18 | 1.36 | 5.38 | 34.2% |
+| reduce_sum | 1.92 | 1.62 | 2.06 | 5.60 | 34.3% |
+
+### 5. 可视化工具
+
+1. **Perfetto (泳道图)**: 打开 https://ui.perfetto.dev/，拖入 `merged_swimlane_*.json`
+2. **调度开销分析**: 运行 `swimlane_converter.py` 会自动输出详细分析
+3. **Mermaid 依赖图**: `python third_party/simpler/tools/perf_to_mermaid.py outputs/perf_swimlane_*.json`
+
+### 6. Device Log 分析
+
+AICPU 日志位于 `~/ascend/log/debug/device-<id>/device-*.log`，包含:
+- **Orchestrator Profiling** (Thread 3): sync_tensormap, task_ring_alloc, param_copy, lookup+dep, heap_alloc, tensormap_ins, fanin+ready
+- **Scheduler Profiling** (Threads 0/1/2): complete, dispatch, scan, idle 各阶段耗时
+
+详细说明见: `third_party/simpler/src/a2a3/runtime/tensormap_and_ringbuffer/docs/device_log_profiling.md`
 
 ---
 

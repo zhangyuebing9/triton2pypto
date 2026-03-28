@@ -1145,12 +1145,7 @@ class TTIRToPyptoConverter:
         self.value_map[self._value_key(op.result)] = result_var
 
     def _convert_tt_reduce(self, op: MLIROperation) -> None:
-        """Convert ``tt.reduce`` to ``tile.row_sum`` / ``tile.sum`` / ``tile.max``.
-
-        For 1D reductions (e.g. ``tl.sum`` on a 1D block), use ``tile.row_sum``
-        which avoids producing sub-alignment tiles. A temporary tile is allocated
-        for the ``row_sum`` intermediate.
-        """
+        """Convert ``tt.reduce`` to ``tile.sum`` / ``tile.max``."""
         if not op.result or not op.operands:
             return
         inp = self._get_operand(op.operands[0])
@@ -1175,18 +1170,20 @@ class TTIRToPyptoConverter:
         if isinstance(inp_type, ir.TileType):
             inp_shape = list(inp_type.shape)
 
-        if inp_shape and len(inp_shape) == 2 and reduce_kind == "sum":
-            rows, cols = inp_shape
-            if rows >= 8 and cols > 1:
-                tmp = self._aligned_full(inp_shape, DataType.FP32, 0.0, span=self.span)
+        if reduce_kind == "sum":
+            if inp_shape and len(inp_shape) == 2 and inp_shape[0] == 1:
+                # For [1, N] tiles (converted from 1D), reduce along axis=1
+                # to sum all elements (matching TTIR axis=0 on 1D tensor)
+                # Use tile.row_sum with tmp_tile. Output is RowMajor [rows,1] tile.
+                rows, cols = inp_shape
+                tmp_shape = [max(8, rows), cols]
+                tmp = tile.full(tmp_shape, DataType.FP32, 0.0, span=self.span)
                 tmp_var = self.ib.let(f"reduce_tmp_{self._tmp_id()}", tmp)
                 result_expr = tile.row_sum(inp, tmp_var, span=self.span)
             else:
                 result_expr = tile.sum(inp, axis=axis, keepdim=True, span=self.span)
-        elif reduce_kind == "max":
-            result_expr = tile.max(inp, axis=axis, keepdim=True, span=self.span)
         else:
-            result_expr = tile.sum(inp, axis=axis, keepdim=True, span=self.span)
+            result_expr = tile.max(inp, axis=axis, keepdim=True, span=self.span)
 
         result_var = self.ib.let(
             f"reduce_{op.result.name}".replace("%", ""),

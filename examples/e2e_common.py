@@ -70,6 +70,7 @@ def make_pypto_run_config(
         rc.rtol = rtol
     if atol is not None:
         rc.atol = atol
+    rc.enable_profiling = enable_profiling
     return rc
 
 
