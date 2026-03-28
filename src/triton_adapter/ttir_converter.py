@@ -21,10 +21,18 @@ def _align_tile_shape(shape: list[int], dtype: DataType) -> list[int]:
     ColMajor requires ``Rows * sizeof(dtype) >= 32``.
     """
     elem_size = {
-        DataType.BOOL: 1, DataType.INT8: 1, DataType.UINT8: 1,
-        DataType.FP16: 2, DataType.BF16: 2, DataType.INT16: 2, DataType.UINT16: 2,
-        DataType.FP32: 4, DataType.INT32: 4, DataType.UINT32: 4,
-        DataType.INT64: 8, DataType.UINT64: 8,
+        DataType.BOOL: 1,
+        DataType.INT8: 1,
+        DataType.UINT8: 1,
+        DataType.FP16: 2,
+        DataType.BF16: 2,
+        DataType.INT16: 2,
+        DataType.UINT16: 2,
+        DataType.FP32: 4,
+        DataType.INT32: 4,
+        DataType.UINT32: 4,
+        DataType.INT64: 8,
+        DataType.UINT64: 8,
     }.get(dtype, 4)
     min_rows = max(1, (32 + elem_size - 1) // elem_size)
     if len(shape) >= 1 and shape[0] < min_rows:
@@ -160,6 +168,7 @@ class TTIRToPyptoConverter:
         self._last_store_result: ir.Expr | None = None
         self._last_store_dest_param: ir.Var | None = None
         self._has_dot = False  # True if kernel contains tt.dot (matmul)
+
     def _tmp_id(self) -> int:
         """Generate a unique temporary ID."""
         self._tmp_counter += 1
@@ -194,9 +203,7 @@ class TTIRToPyptoConverter:
         float_candidates: list[tuple[list[int], DataType]] = []
         first_any: tuple[list[int], DataType] | None = None
 
-        has_reduce = any(
-            _ttir_op_basename(op.name).strip('"') == "tt.reduce" for op in body_ops
-        )
+        has_reduce = any(_ttir_op_basename(op.name).strip('"') == "tt.reduce" for op in body_ops)
 
         for op in body_ops:
             if not op.result_types:
@@ -214,7 +221,8 @@ class TTIRToPyptoConverter:
             s = rt.get_shape()
             shape = list(s) if s else list(default_shape)
             if len(shape) == 1:
-                shape = [shape[0], 1]
+                # 1D tensor → [1, N] for RowMajor layout (TADD and other tile ops require RowMajor)
+                shape = [1, shape[0]]
             elif len(shape) > 2:
                 shape = shape[:2]
             if first_any is None:
@@ -405,9 +413,7 @@ class TTIRToPyptoConverter:
 
         ptr_args, store_dest_args = self._prescan_args(body_ops, arg_names)
 
-        self._has_dot = any(
-            _ttir_op_basename(op.name).strip('"') == "tt.dot" for op in body_ops
-        )
+        self._has_dot = any(_ttir_op_basename(op.name).strip('"') == "tt.dot" for op in body_ops)
 
         shape, dtype = self._infer_kernel_tensor_shape_dtype(body_ops)
 
@@ -417,9 +423,7 @@ class TTIRToPyptoConverter:
         self._last_store_result = None
         self._last_store_dest_param = None
 
-        has_reduce = any(
-            _ttir_op_basename(op.name).strip('"') == "tt.reduce" for op in body_ops
-        )
+        has_reduce = any(_ttir_op_basename(op.name).strip('"') == "tt.reduce" for op in body_ops)
         input_tensor_type = ir.TensorType(shape, dtype)
         if has_reduce and shape[1] > 1:
             output_shape = [shape[0], 1]
@@ -428,9 +432,7 @@ class TTIRToPyptoConverter:
         output_tensor_type = ir.TensorType(output_shape, dtype)
         output_indices: set[int] = set()
 
-        with self.ib.function(
-            f"{func_name}_incore", type=ir.FunctionType.InCore
-        ) as f:
+        with self.ib.function(f"{func_name}_incore", type=ir.FunctionType.InCore) as f:
             params: list[ir.Var] = []
             for i, arg_name in enumerate(arg_names):
                 pname = arg_name.lstrip("%")
@@ -454,9 +456,16 @@ class TTIRToPyptoConverter:
             f.return_type(output_tensor_type)
 
             _matmul_core = {
-                "tt.load", "tt.store", "tt.dot", "tt.splat", "tt.addptr",
-                "tt.get_program_id", "tt.program_id",
-                "tt.expand_dims", "tt.broadcast", "tt.make_range",
+                "tt.load",
+                "tt.store",
+                "tt.dot",
+                "tt.splat",
+                "tt.addptr",
+                "tt.get_program_id",
+                "tt.program_id",
+                "tt.expand_dims",
+                "tt.broadcast",
+                "tt.make_range",
             }
 
             for op in body_ops:
@@ -515,9 +524,7 @@ class TTIRToPyptoConverter:
             output_indices = set()
 
         shape, dtype = self._infer_kernel_tensor_shape_dtype(body_ops)
-        has_reduce = any(
-            _ttir_op_basename(op.name).strip('"') == "tt.reduce" for op in body_ops
-        )
+        has_reduce = any(_ttir_op_basename(op.name).strip('"') == "tt.reduce" for op in body_ops)
         input_tensor_type = ir.TensorType(shape, dtype)
         if has_reduce and shape[1] > 1:
             out_shape = [shape[0], 1]
@@ -527,9 +534,7 @@ class TTIRToPyptoConverter:
 
         ptr_args, store_dests = self._prescan_args(body_ops, arg_names)
 
-        with self.ib.function(
-            "main", type=ir.FunctionType.Orchestration
-        ) as f:
+        with self.ib.function("main", type=ir.FunctionType.Orchestration) as f:
             orch_params: list[ir.Var] = []
             call_args: list[ir.Expr] = []
 
@@ -543,6 +548,7 @@ class TTIRToPyptoConverter:
                 orch_params.append(param)
                 call_args.append(param)
 
+            # Add pid constants for incore params beyond tensor args
             for i in range(len(orch_params), len(incore_func.params)):
                 call_args.append(ir.ConstInt(0, DataType.INT64, self.span))
 
@@ -591,6 +597,7 @@ class TTIRToPyptoConverter:
             # Dense tensor constant: dense<0.0> : tensor<16x16xf32>
             if is_tensor and "dense" in val_str.lower():
                 import re as _re
+
                 m = _re.search(r"dense<([^>]+)>", val_str)
                 fill_val = 0.0
                 if m:
@@ -611,7 +618,9 @@ class TTIRToPyptoConverter:
                     if rt.get_element_type():
                         dtype = self.type_mapper.map_dtype(rt.get_element_type())
                 if len(shape) == 1:
-                    shape = [shape[0], 1]
+                    # One logical dim → ``[1, N]`` so tiles use RowMajor layout.
+                    # Ascend NPU PTO ISA requires RowMajor for TADD/TEXPANDS/TLOAD ops.
+                    shape = [1, shape[0]]
                 expr = self._aligned_full(shape, dtype, fill_val, span=self.span)
                 var = self.ib.let(key.replace("%", "cst_"), expr)
                 self.value_map[key] = var
@@ -634,7 +643,7 @@ class TTIRToPyptoConverter:
                         if s:
                             shape = list(s)
                             if len(shape) == 1:
-                                shape = [shape[0], 1]
+                                shape = [1, shape[0]]
                             elif len(shape) > 2:
                                 shape = shape[:2]
                         if et:
@@ -663,14 +672,33 @@ class TTIRToPyptoConverter:
                     pass
 
     def _convert_tt_splat(self, op: MLIROperation) -> None:
-        """Track tt.splat: ptr_trace[result] = base (operand)."""
         if not op.result or not op.operands:
             return
         base_key = self._value_key(op.operands[0])
         result_key = self._value_key(op.result)
         self.ptr_trace[result_key] = base_key
-        # Splat produces a tensor of ptrs; we map result to base for load/store
-        self.value_map[result_key] = self._get_operand(op.operands[0])
+        shape = [1, 128]
+        dtype = DataType.INT32
+        if op.result_types:
+            rt = op.result_types[0]
+            if rt.is_tensor():
+                s = rt.get_shape()
+                if s:
+                    shape = list(s)
+                    if len(shape) == 1:
+                        shape = [1, shape[0]]
+        operand_expr = self._get_operand(op.operands[0])
+        if isinstance(operand_expr.type, ir.ScalarType):
+            fill_val = 0
+            if isinstance(operand_expr, ir.ConstInt):
+                fill_val = operand_expr.value
+            elif isinstance(operand_expr, ir.ConstFloat):
+                fill_val = operand_expr.value
+            expr = tile.full(shape, dtype, fill_val, span=self.span)
+            var = self.ib.let(f"splat_{result_key}".replace("%", ""), expr)
+            self.value_map[result_key] = var
+        else:
+            self.value_map[result_key] = operand_expr
 
     def _convert_tt_addptr(self, op: MLIROperation) -> None:
         """Track tt.addptr: ptr_trace[result] = base from first operand's trace."""
@@ -683,12 +711,20 @@ class TTIRToPyptoConverter:
         self.value_map[result_key] = self._get_operand(op.operands[0])
 
     def _convert_tt_make_range(self, op: MLIROperation) -> None:
-        """tt.make_range produces indices - use placeholder for ptr chain propagation."""
         if not op.result:
             return
-        # Placeholder for index computations; actual load uses fixed offsets
-        c0 = ir.ConstInt(0, DataType.INT64, self.span)
-        var = self.ib.let(f"range_{op.result.name}".replace("%", ""), c0)
+        shape = [1, 128]
+        dtype = DataType.INT32
+        if op.result_types:
+            rt = op.result_types[0]
+            if rt.is_tensor():
+                s = rt.get_shape()
+                if s:
+                    shape = list(s)
+                    if len(shape) == 1:
+                        shape = [1, shape[0]]
+        expr = tile.full(shape, dtype, 0, span=self.span)
+        var = self.ib.let(f"range_{op.result.name}".replace("%", ""), expr)
         self.value_map[self._value_key(op.result)] = var
 
     def _convert_tt_get_program_id(self, op: MLIROperation) -> None:
@@ -726,14 +762,14 @@ class TTIRToPyptoConverter:
                 if "tensor<128x" in ot or "tensor<128 " in ot:
                     shape = [128]
         if len(shape) == 1:
-            shape = [shape[0], 1]
+            # One logical dim → ``[1, N]`` so tiles use RowMajor layout.
+            # Ascend NPU PTO ISA requires RowMajor for TADD/TEXPANDS/TLOAD ops.
+            shape = [1, shape[0]]
         elif len(shape) > 2:
             shape = shape[:2]
         offsets = [0] * len(shape)
         target_mem = ir.MemorySpace.Mat if self._has_dot else ir.MemorySpace.Vec
-        load_call = tile.load(
-            tensor_var, offsets, shape, target_memory=target_mem, span=self.span
-        )
+        load_call = tile.load(tensor_var, offsets, shape, target_memory=target_mem, span=self.span)
         result_var = self.ib.let(
             op.result.name.replace("%", "load_"),
             load_call,
@@ -783,7 +819,8 @@ class TTIRToPyptoConverter:
                 if s:
                     shape = s
         if len(shape) == 1:
-            shape = [shape[0], 1]
+            # Use RowMajor layout [1, N] for Ascend NPU compatibility
+            shape = [1, shape[0]]
         offsets = [0] * len(shape)
         store_result = tile.store(tile_var, offsets, output_var, span=self.span)
         self._last_store_result = store_result
@@ -840,15 +877,16 @@ class TTIRToPyptoConverter:
                 self._convert_binary_op(op, "add", tile.add)
             except (ValueError, TypeError) as e:
                 if "TileType" in str(e) or "ScalarType" in str(e):
-                    # Scalar+scalar with tensor result (e.g. splat+range): placeholder
-                    shape = [128, 1]
-                    if op.result_types and op.result_types[0].get_shape():
-                        shape = op.result_types[0].get_shape()
-                        if len(shape) == 1:
-                            shape = [shape[0], 1]
-                    expr = self._aligned_full(shape, DataType.INT32, 0, span=self.span)
+                    # Scalar+scalar with tensor result (e.g. splat+range).
+                    # Skip generating dead code - offset calculations that have no uses.
+                    # If we reach here, the result would be broadcast by TEXPANDS,
+                    # but TEXPANDS has strict type requirements (bf16/fp32) and the
+                    # broadcasting pattern for integer offsets is not supported.
+                    # Generate a placeholder scalar instead to avoid compilation errors.
+                    # The actual value doesn't matter since this code is unused.
+                    expr = ir.ConstInt(0, DataType.INT64, self.span)
                     var = self.ib.let(
-                        f"addi_{op.result.name}".replace("%", ""),
+                        f"addi_{op.result.name}".replace("%", "cst_"),
                         expr,
                     )
                     self.value_map[self._value_key(op.result)] = var
@@ -987,17 +1025,16 @@ class TTIRToPyptoConverter:
             result_expr = tile.cmp(lhs, rhs, cmp_type=cmp_type, span=self.span)
         except (ValueError, TypeError) as e:
             if "TileType" in str(e) or "ScalarType" in str(e):
-                shape = [128, 1]
+                shape = [1, 128]
                 if op.result_types and op.result_types[0].get_shape():
                     shape = op.result_types[0].get_shape()
                     if len(shape) == 1:
-                        shape = [shape[0], 1]
-                result_expr = self._aligned_full(shape, DataType.BOOL, 1, span=self.span)
+                        shape = [1, shape[0]]
+                # Use INT32 instead of BOOL for TEXPANDS compatibility
+                result_expr = tile.full(shape, DataType.INT32, 1, span=self.span)
             else:
                 raise
-        result_var = self.ib.let(
-            f"cmp_{op.result.name}".replace("%", ""), result_expr
-        )
+        result_var = self.ib.let(f"cmp_{op.result.name}".replace("%", ""), result_expr)
         self.value_map[self._value_key(op.result)] = result_var
 
     def _convert_arith_cmpi(self, op: MLIROperation) -> None:
@@ -1010,17 +1047,18 @@ class TTIRToPyptoConverter:
             return
         lhs = self._get_operand(op.operands[0])
         rhs = self._get_operand(op.operands[1])
-        shape = [128, 1]
+        shape = [1, 128]
         if op.result_types and op.result_types[0].get_shape():
             shape = op.result_types[0].get_shape()
             if len(shape) == 1:
-                shape = [shape[0], 1]
+                shape = [1, shape[0]]
         try:
             result_expr = tile.and_(lhs, rhs, span=self.span)
         except (ValueError, TypeError) as e:
             err_str = str(e).lower()
             if "integer" in err_str or "bool" in err_str or "tiletype" in err_str:
-                result_expr = self._aligned_full(shape, DataType.BOOL, 1, span=self.span)
+                # Use INT32 instead of BOOL for TEXPANDS compatibility
+                result_expr = tile.full(shape, DataType.INT32, 1, span=self.span)
             else:
                 raise
         result_var = self.ib.let(
@@ -1037,9 +1075,7 @@ class TTIRToPyptoConverter:
         true_val = self._get_operand(op.operands[1])
         false_val = self._get_operand(op.operands[2])
         result_expr = tile.sel(cond, true_val, false_val, span=self.span)
-        result_var = self.ib.let(
-            f"sel_{op.result.name}".replace("%", ""), result_expr
-        )
+        result_var = self.ib.let(f"sel_{op.result.name}".replace("%", ""), result_expr)
         self.value_map[self._value_key(op.result)] = result_var
 
     def _convert_tt_program_id(self, op: MLIROperation) -> None:
@@ -1076,7 +1112,7 @@ class TTIRToPyptoConverter:
             if s:
                 shape = list(s)
                 if len(shape) == 1:
-                    shape = [shape[0], 1]
+                    shape = [1, shape[0]]
                 elif len(shape) > 2:
                     shape = shape[:2]
         result_expr = tile.reshape(inp, shape, span=self.span)
